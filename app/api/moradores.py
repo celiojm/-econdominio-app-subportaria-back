@@ -483,6 +483,26 @@ async def update_morador(
         if morador_data.get("bloco") is not None:
             morador_data["bloco"] = normalizar_bloco(db, exists.condominio_id, morador_data.get("bloco"))
 
+        # 2026-09-30: cadastro igual a outro (uk_morador: condomínio+nome+apto+bloco) — antes dava 500.
+        # Outro INATIVO: ganha "(inativo #id)" no nome e libera; outro ATIVO: 409 com a explicação.
+        igual = db.execute(text("""
+            SELECT id, nome, ativo FROM moradores
+            WHERE condominio_id = :c AND nome = :n AND apartamento = :a AND bloco <=> :b AND id <> :id
+            LIMIT 1
+        """), {"c": exists.condominio_id, "n": morador_data.get("nome"), "a": morador_data.get("apartamento"),
+               "b": morador_data.get("bloco"), "id": morador_id}).fetchone()
+        if igual and igual.ativo == 0:
+            db.execute(text("""
+                UPDATE moradores SET nome = LEFT(CONCAT(nome, ' (inativo #', id, ')'), 200) WHERE id = :i
+            """), {"i": igual.id})
+        elif igual:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(f"Já existe um cadastro ativo de {igual.nome} no apto {morador_data.get('apartamento')}"
+                        f" / bloco {morador_data.get('bloco') or '(único)'} (#{igual.id}). "
+                        "Junte os dois em Unidades (Mesclar) ou inative um deles.")
+            )
+
         update_query = text("""
             UPDATE moradores
             SET nome = :nome,
