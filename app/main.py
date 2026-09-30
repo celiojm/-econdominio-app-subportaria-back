@@ -51,6 +51,9 @@ from app.routers.whatsapp_webhook import router as whatsapp_webhook_router
 from leads.router import router as leads_router
 # Configurar logging
 logger = logging.getLogger(__name__)
+# 2026-09-30: não gravar URLs de chamadas externas no log (a URL do Z-API leva o token)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Criar as tabelas
 Base.metadata.create_all(bind=engine)
