@@ -1,0 +1,21 @@
+# ============================================
+# DEPENDÊNCIAS DE AUTENTICAÇÃO
+# ============================================
+
+# FastAPI
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Database
+pymysql>=1.1.0
+cryptography>=41.0.0  # Necessário para pymysql
+
+# Autenticação e Segurança
+passlib[argon2]>=1.7.4  # Hash de senhas com Argon2id
+python-jose[cryptography]>=3.3.0  # JWT
+python-dotenv>=1.0.0  # Variáveis de ambiente
+pydantic[email]>=2.4.0  # Validação de emails
+
+# Opcional (se quiser usar bcrypt ao invés de argon2)
+# bcrypt>=4.1.0

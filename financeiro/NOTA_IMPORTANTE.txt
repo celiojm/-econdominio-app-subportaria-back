@@ -1,0 +1,76 @@
+╔══════════════════════════════════════════════════════════════╗
+║                    ⚠️  ATENÇÃO IMPORTANTE  ⚠️                 ║
+╚══════════════════════════════════════════════════════════════╝
+
+O arquivo Cobrancas.jsx que você me mostrou JÁ ESTÁ CORRETO!
+
+Não precisa alterar NADA no frontend!
+
+O arquivo que você tem em:
+  ~/encomendaV2/financeiro/src/pages/Cobrancas.jsx
+
+JÁ TEM a função enviarEmail correta (linha ~637):
+
+  const enviarEmail = async (cobranca) => {
+    try {
+      setEnviandoEmail(true);
+      setEmailEnviandoId(cobranca.id);
+      
+      // Usar a nova rota de email
+      const response = await api.post(`/email/reenviar/${cobranca.id}`);
+      
+      if (response.data.success) {
+        showToast(`Email enviado para ${response.data.email_destino}!`, 'success');
+      }
+    } catch (err) {
+      showToast('Erro ao enviar email', 'error');
+    } finally {
+      setEnviandoEmail(false);
+      setEmailEnviandoId(null);
+    }
+  };
+
+E o botão Email está correto (linha ~746):
+
+  <button
+    onClick={() => enviarEmail(item)}
+    disabled={enviandoEmail && emailEnviandoId === item.id}
+    className="...">
+    {enviandoEmail && emailEnviandoId === item.id ? (
+      <><Loader2 className="h-3 w-3 animate-spin" /> Enviando...</>
+    ) : (
+      <><Mail className="h-3 w-3" /> Email</>
+    )}
+  </button>
+
+═══════════════════════════════════════════════════════════════
+
+✅ O QUE ESTÁ PRONTO:
+
+  Backend:
+  - ✅ financeiro_email.py (módulo de email)
+  - ✅ financeiro_email_routes.py (rota /email/reenviar)
+  - ✅ financeiro_rotas.py (registra a rota)
+  
+  Frontend:
+  - ✅ Cobrancas.jsx (botão e função já corretos)
+
+═══════════════════════════════════════════════════════════════
+
+🔥 FALTA APENAS:
+
+  1. Reiniciar o backend:
+     sudo systemctl restart backend-encomenda.service
+
+  2. Testar:
+     curl http://localhost:5000/email/teste
+
+═══════════════════════════════════════════════════════════════
+
+📝 NÃO PRECISA FAZER npm run build NO FRONTEND!
+
+O código React já está correto. Só precisa:
+  1. Reiniciar o BACKEND
+  2. Testar o botão
+
+═══════════════════════════════════════════════════════════════

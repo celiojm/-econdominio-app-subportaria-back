@@ -1,0 +1,62 @@
+# .gitignore — ~/app_subportaria_back
+# ALLOWLIST: ignora tudo por padrão, libera só extensões de código-fonte
+# conhecidas. Pasta tem muito arquivo-lixo com nome fora de padrão
+# (router.py-280326, .env-2whtas, etc.) que um blocklist não pegaria —
+# ver CLAUDE.md seção 15-G.
+
+# 1) ignora tudo
+*
+
+# 2) libera diretórios, senão o git nem desce neles
+!*/
+
+# 3) re-ignora pastas técnicas ANTES de liberar extensões (senão libera
+#    todo .py de dentro do venv/, por exemplo)
+venv/
+env/
+__pycache__/
+.pytest_cache/
+node_modules/
+logs/
+*/logs/
+backup_*/
+
+# 4) libera extensões de código-fonte conhecidas
+!*.py
+!*.md
+!*.txt
+!*.json
+!*.yml
+!*.yaml
+!*.sh
+!*.sql
+!*.cfg
+!*.ini
+!*.toml
+!.gitignore
+!.gitattributes
+!Dockerfile
+!requirements*.txt
+
+# 5) reforço redundante — mesmo que algo acima libere por engano,
+#    estes nunca entram (padrões pedidos + variações reais achadas)
+.env
+.env.*
+.env-*
+.env_*
+*.env
+*.pem
+*.key
+*.crt
+*.bak
+*.bak_*
+*.bak.*
+*.backup*
+*.old
+*.orig
+*.erro
+*.new
+*.save
+*.pyc
+*.log
+senha.py
