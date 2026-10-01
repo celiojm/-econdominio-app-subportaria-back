@@ -139,6 +139,8 @@ from app.api import auditoria as auditoria_api  # 2026-09-30: relatório de log
 app.include_router(auditoria_api.router, prefix="/api/auditoria", tags=["auditoria"])
 from app.api import unidades as unidades_api  # 2026-09-30: cadastro de unidades
 app.include_router(unidades_api.router, prefix="/api/unidades", tags=["unidades"])
+from app.api import whatsapp_entregas as whatsapp_entregas_api  # 2026-10-01: comprovante/relatório WhatsApp
+app.include_router(whatsapp_entregas_api.router, prefix="/api/whatsapp-entregas", tags=["whatsapp-entregas"])
 app.include_router(lotes.router, prefix="/api/lotes", tags=["lotes"])
 app.include_router(condominio.router, prefix="/api/condominios", tags=["condominios"])
 app.include_router(locais_armazenamento.router, prefix="/api/locais-armazenamento", tags=["locais-armazenamento"])
