@@ -2022,25 +2022,17 @@ async def receive_webhook(request: Request):
 
                 if statuses:
                     logger.info("Statuses recebidos: %s", statuses)
-                    for st in statuses:
+                    # 2026-10-01: comprovante de entrega (antes gravava em whatsapp_status_entregas, tabela
+                    # que não existe). Sessão própria: não mistura com a transação do webhook.
+                    try:
+                        from app.services.whatsapp_entregas import registrar_status
+                        _db_st = SessionLocal()
                         try:
-                            pricing = st.get("pricing", {}) or {}
-                            db.execute(text("""
-                                INSERT IGNORE INTO AdmGeral.whatsapp_status_entregas
-                                    (message_id, recipient_id, status, billable, category, pricing_model, tipo)
-                                VALUES
-                                    (:mid, :rid, :status, :billable, :category, :pricing_model, :tipo)
-                            """), {
-                                "mid":           st.get("id", ""),
-                                "rid":           st.get("recipient_id", ""),
-                                "status":        st.get("status", ""),
-                                "billable":      1 if pricing.get("billable") else 0,
-                                "category":      pricing.get("category", ""),
-                                "pricing_model": pricing.get("pricing_model", ""),
-                                "tipo":          pricing.get("type", ""),
-                            })
-                        except Exception as e_st:
-                            logger.debug("Erro ao salvar status billing: %s", e_st)
+                            registrar_status(_db_st, statuses)
+                        finally:
+                            _db_st.close()
+                    except Exception as e_st:
+                        logger.warning("whatsapp_entregas: %s", e_st)
 
                 if not messages:
                     continue

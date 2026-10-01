@@ -157,6 +157,12 @@ async def list_encomendas(
                 "img_etiqueta": getattr(row, 'img_etiqueta', None),
                 "img_etiqueta_server": getattr(row, 'img_etiqueta_server', None),
                 "codigo_retirada": getattr(row, 'codigo_retirada', None),
+                # 2026-10-01: comprovante do aviso de chegada (whatsapp_entregas)
+                "whatsapp_status": getattr(row, 'whatsapp_status', None),
+                "whatsapp_enviado_em": row.whatsapp_enviado_em.isoformat() if getattr(row, 'whatsapp_enviado_em', None) else None,
+                "whatsapp_entregue_em": row.whatsapp_entregue_em.isoformat() if getattr(row, 'whatsapp_entregue_em', None) else None,
+                "whatsapp_lido_em": row.whatsapp_lido_em.isoformat() if getattr(row, 'whatsapp_lido_em', None) else None,
+                "whatsapp_erro": getattr(row, 'whatsapp_erro', None),
             }
             encomendas.append(encomenda)
 

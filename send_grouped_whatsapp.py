@@ -880,6 +880,12 @@ def process_group(phone: str, msgs: list, zapi_connected: bool, zapi_sends_done:
         if result.get("success"):
             mark_as_sent(db, ids)
             db.commit()
+            # 2026-10-01: comprovante de entrega (whatsapp_entregas + resumo na encomenda); nunca falha o envio
+            try:
+                from app.services.whatsapp_entregas import registrar_envio
+                registrar_envio(db, msgs, result.get("provider"), result.get("message_id"), phone)
+            except Exception as e_reg:
+                logger.warning("whatsapp_entregas indisponivel: %s", e_reg)
             logger.info("Enviado | tel=%s | provider=%s | id=%s",
                         phone, result.get("provider"), result.get("message_id"))
             if usou_zapi:
