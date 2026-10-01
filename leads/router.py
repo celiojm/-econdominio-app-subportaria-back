@@ -242,6 +242,9 @@ def _upsert_lead(
         nova_ocorrencia = f"[{agora_str}] {rotulo_ocorrencia} {origem}"
         if mensagem:
             nova_ocorrencia += f': "{mensagem}"'
+        campanha = ref or utm_campaign or utm_source  # 2026-09-30: campanha no histórico de cada contato
+        if campanha and not qualificacao:
+            nova_ocorrencia += f" [campanha: {campanha}]"
         if qualificacao:
             valor_q = {"perfil": perfil, "nome": nome, "cnpj": cnpj or razao_social}.get(qualificacao)
             nova_ocorrencia = f"[{agora_str}] Qualificação WhatsApp — {qualificacao}: {valor_q or '(sem resposta)'}"
@@ -263,6 +266,11 @@ def _upsert_lead(
                         razao_social = CASE WHEN :forcar = 1 AND :razao_social IS NOT NULL THEN :razao_social
                                     ELSE COALESCE(NULLIF(razao_social, ''), :razao_social) END,
                         cidade = COALESCE(NULLIF(cidade, ''), :cidade),
+                        ref = COALESCE(NULLIF(ref, ''), :ref),
+                        utm_source = COALESCE(NULLIF(utm_source, ''), :utm_source),
+                        utm_medium = COALESCE(NULLIF(utm_medium, ''), :utm_medium),
+                        utm_campaign = COALESCE(NULLIF(utm_campaign, ''), :utm_campaign),
+                        utm_content = COALESCE(NULLIF(utm_content, ''), :utm_content),
                         consentimento_em = CASE
                             WHEN consentimento_lgpd = 0 AND :consentimento_lgpd = 1 THEN NOW()
                             ELSE consentimento_em
@@ -283,6 +291,8 @@ def _upsert_lead(
                     "cidade": cidade,
                     "observacao": observacao_nova,
                     "perfil": perfil,
+                    "ref": ref, "utm_source": utm_source, "utm_medium": utm_medium,
+                    "utm_campaign": utm_campaign, "utm_content": utm_content,
                     "forcar": 1 if (qualificacao or sobrescrever) else 0,
                     "incremento": 0 if qualificacao else 1,
                     "id": existente.id,
