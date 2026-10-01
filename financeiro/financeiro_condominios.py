@@ -956,3 +956,31 @@ async def atualizar_agendamento_contato(id_contato: int, dados: AgendamentoStatu
     if not n:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
     return {"success": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEADS DO SITE NO FINANCEIRO (2026-09-30)
+# Mesma consulta/edição do admin (/painel/leads em admin/leads.py), com o login do
+# financeiro (usuario_interno). Tabela `leads` (site /conheca + WhatsApp do funil).
+# ══════════════════════════════════════════════════════════════════════════════
+@router.get("/leads-site")
+async def leads_site(
+    status: Optional[str] = Query(None),
+    origem: Optional[str] = Query(None),
+    utm_campaign: Optional[str] = Query(None),
+    data_inicio: Optional[str] = Query(None),
+    data_fim: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    quem: dict = Depends(_usuario_interno),
+):
+    from admin.leads import listar_leads
+    return await listar_leads(status=status, origem=origem, utm_campaign=utm_campaign,
+                              data_inicio=data_inicio, data_fim=data_fim, page=page, limit=limit,
+                              current_user={"role": "admin_sistema"})
+
+
+@router.patch("/leads-site/{lead_id}")
+async def atualizar_lead_site(lead_id: int, dados: dict, quem: dict = Depends(_usuario_interno)):
+    from admin.leads import atualizar_lead, AtualizarLeadRequest
+    return await atualizar_lead(lead_id, AtualizarLeadRequest(**dados), current_user={"role": "admin_sistema"})
