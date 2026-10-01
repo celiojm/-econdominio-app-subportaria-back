@@ -63,6 +63,11 @@ app = FastAPI(title="Sistema de Gestão de Encomendas")
 # Exception handler para erro 422 - DEVE VIR ANTES DOS ROUTERS
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/api/leads"):
+        # 2026-09-30: leads têm dado pessoal (nome/WhatsApp/CNPJ) — só campo e motivo no log (LGPD)
+        logger.warning("❌ 422 em %s | %s", request.url.path,
+                       [(".".join(str(x) for x in e.get("loc", [])[1:]), e.get("msg")) for e in exc.errors()])
+        return JSONResponse(status_code=422, content={"detail": "dados inválidos"})
     exc_str = f'{exc}'.replace('\n', ' ').replace('   ', ' ')
     logger.error("=" * 80)
     logger.error(f"❌ ERRO 422 - VALIDAÇÃO FALHOU")

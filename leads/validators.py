@@ -118,7 +118,9 @@ def normalizar_whatsapp_br(raw: str) -> Optional[str]:
         return None
     digitos = "".join(c for c in raw if c.isdigit())
 
-    if digitos.startswith("55"):
+    # 2026-09-30: "55" só é o código do país quando o número tem 12/13 dígitos; com 10/11
+    # dígitos é o DDD 55 (RS) — antes o celular do DDD 55 era recusado.
+    if len(digitos) in (12, 13) and digitos.startswith("55"):
         resto = digitos[2:]
     else:
         resto = digitos

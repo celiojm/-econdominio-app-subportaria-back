@@ -363,6 +363,9 @@ async def criar_lead_formulario(data: LeadFormularioRequest, request: Request, b
 
     whatsapp_canonico = normalizar_whatsapp_br(data.whatsapp)
     if not whatsapp_canonico:
+        # 2026-09-30: registra o motivo (sem o número — LGPD)
+        logger.warning("Lead recusado (WhatsApp fora do padrão de celular BR) | digitos=%d | ip=%s",
+                       sum(c.isdigit() for c in (data.whatsapp or "")), ip)
         raise HTTPException(status_code=422, detail="dados inválidos")
 
     try:
@@ -425,6 +428,9 @@ async def criar_lead_whatsapp(data: LeadWhatsAppRequest, request: Request):
 
     whatsapp_canonico = normalizar_whatsapp_br(data.whatsapp)
     if not whatsapp_canonico:
+        # 2026-09-30: registra o motivo (sem o número — LGPD)
+        logger.warning("Lead recusado (WhatsApp fora do padrão de celular BR) | digitos=%d | ip=%s",
+                       sum(c.isdigit() for c in (data.whatsapp or "")), ip)
         raise HTTPException(status_code=422, detail="dados inválidos")
 
     try:
