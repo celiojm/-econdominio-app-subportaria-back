@@ -8,7 +8,9 @@
 #            GET /api/whatsapp-entregas/relatorio — totais, por condomínio (master) e lista paginada,
 #                filtros: condomínio, período, tipo, status. Master: todos; síndico/admin_condominio:
 #                só o próprio; demais papéis: 403.
-# VERSÃO: 1.0.0 - criação
+# VERSÃO: 1.2.0 - falhas da nossa conta (ERROS_INTERNOS) só para o master (2026-10-01)
+#         1.1.0 - filtro erro_codigo; lista devolve morador_id e nome do morador (2026-10-01)
+#         1.0.0 - criação
 # data criação: 2026-10-01 data alteração: 2026-10-01
 # ============================================================================
 from typing import Optional
@@ -46,6 +48,11 @@ ERRO_ROTULO = {
     131000: "Erro interno da Meta",
 }
 
+# Falhas causadas pela NOSSA conta/configuração (não pelo morador): ocultas para síndico/condomínio.
+# 131042 pagamento Meta · 131048/130429/131056 limites · 131031 conta bloqueada · 1320xx template · 190 token
+ERROS_INTERNOS = (131042, 131048, 130429, 131056, 131031, 131000, 132000, 132001, 132005, 132007, 132012, 132015, 132016, 190)
+_SEM_INTERNOS = "(w.erro_codigo IS NULL OR w.erro_codigo NOT IN (" + ",".join(map(str, ERROS_INTERNOS)) + "))"
+
 COLS = """w.id, w.message_id, w.encomenda_id, w.condominio_id, w.telefone, w.tipo_evento, w.provider, w.status,
           w.enviado_em, w.entregue_em, w.lido_em, w.falhou_em, w.erro_codigo, w.erro_titulo"""
 
@@ -75,7 +82,8 @@ async def comprovante_encomenda(encomenda_id: int, current_user: dict = Depends(
         raise HTTPException(status_code=404, detail="Encomenda não encontrada")
     if not is_admin_master(current_user) and current_user.get("condominio_id") != enc.condominio_id:
         raise HTTPException(status_code=403, detail="Encomenda de outro condomínio")
-    rows = db.execute(text(f"SELECT {COLS} FROM whatsapp_entregas w WHERE w.encomenda_id = :i "
+    filtro = "" if is_admin_master(current_user) else f" AND {_SEM_INTERNOS}"
+    rows = db.execute(text(f"SELECT {COLS} FROM whatsapp_entregas w WHERE w.encomenda_id = :i{filtro} "
                            "ORDER BY COALESCE(w.enviado_em, w.criado_em), w.id"), {"i": encomenda_id}).fetchall()
     return {"encomenda_id": encomenda_id, "mensagens": [_item(r) for r in rows]}
 
@@ -87,6 +95,7 @@ async def relatorio(
     data_fim: Optional[str] = Query(None),
     tipo_evento: Optional[str] = Query(None),
     status: Optional[str] = Query(None),        # enviado / entregue / lido / falhou
+    erro_codigo: Optional[int] = Query(None),   # ex.: 131026 (número sem WhatsApp)
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     current_user: dict = Depends(get_current_user),
@@ -101,6 +110,8 @@ async def relatorio(
             raise HTTPException(status_code=403, detail="Usuário sem condomínio")
 
     where, p = ["w.condominio_id IS NOT NULL"], {}
+    if not master:
+        where.append(_SEM_INTERNOS)
     if condominio_id:
         where.append("w.condominio_id = :c"); p["c"] = condominio_id
     if data_inicio:
@@ -110,9 +121,11 @@ async def relatorio(
     if tipo_evento:
         where.append("w.tipo_evento = :t"); p["t"] = tipo_evento
     w_base = " AND ".join(where)
-    w_lista = w_base + (" AND w.status = :s" if status else "")
+    w_lista = w_base + (" AND w.status = :s" if status else "") + (" AND w.erro_codigo = :ec" if erro_codigo else "")
     if status:
         p["s"] = status
+    if erro_codigo:
+        p["ec"] = erro_codigo
 
     tot = db.execute(text(f"""
         SELECT COUNT(*) total, SUM(w.status='enviado') enviado, SUM(w.status='entregue') entregue,
@@ -138,8 +151,10 @@ async def relatorio(
 
     total_lista = db.execute(text(f"SELECT COUNT(*) FROM whatsapp_entregas w WHERE {w_lista}"), p).scalar() or 0
     rows = db.execute(text(f"""
-        SELECT {COLS}, c.nome AS condominio_nome, e.nome_destinatario, e.apartamento, e.bloco
+        SELECT {COLS}, w.morador_id, m.nome AS morador_nome, c.nome AS condominio_nome, e.nome_destinatario,
+               COALESCE(e.apartamento, m.apartamento) AS apartamento, COALESCE(e.bloco, m.bloco) AS bloco
         FROM whatsapp_entregas w
+        LEFT JOIN moradores m ON m.id = w.morador_id
         LEFT JOIN condominios c ON c.id = w.condominio_id
         LEFT JOIN encomendas e ON e.id = w.encomenda_id
         WHERE {w_lista}
@@ -148,7 +163,8 @@ async def relatorio(
     itens = []
     for r in rows:
         it = _item(r)
-        it.update({"condominio_nome": r.condominio_nome, "destinatario": r.nome_destinatario,
+        it.update({"condominio_nome": r.condominio_nome, "destinatario": r.nome_destinatario or r.morador_nome,
+                   "morador_id": r.morador_id,
                    "apartamento": r.apartamento, "bloco": r.bloco})
         itens.append(it)
     return {"resumo": resumo, "erros": erros, "por_condominio": por_cond,

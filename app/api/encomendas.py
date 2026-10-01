@@ -106,6 +106,8 @@ async def list_encomendas(
     """Listar encomendas - V2.6.0 - admin_sistema vê tudo"""
     try:
         cond_id = _resolve_cond_id(current_user, condominio_id)
+        from app.api.condominio import is_admin_master as _iam
+        _master_lista = _iam(current_user)
 
         if cond_id is not None:
             query = "SELECT e.* FROM encomendas e WHERE e.condominio_id = :condominio_id"
@@ -164,6 +166,11 @@ async def list_encomendas(
                 "whatsapp_lido_em": row.whatsapp_lido_em.isoformat() if getattr(row, 'whatsapp_lido_em', None) else None,
                 "whatsapp_erro": getattr(row, 'whatsapp_erro', None),
             }
+            # 2026-10-01: falha causada pela nossa conta (ex.: 131042 pagamento Meta) só para o master
+            if encomenda.get("whatsapp_status") == "falhou" and not _master_lista:
+                from app.api.whatsapp_entregas import ERROS_INTERNOS
+                if str(encomenda.get("whatsapp_erro") or "").split(" ")[0] in {str(c) for c in ERROS_INTERNOS}:
+                    encomenda.update({"whatsapp_status": None, "whatsapp_erro": None, "whatsapp_enviado_em": None})
             encomendas.append(encomenda)
 
         # Contar total
