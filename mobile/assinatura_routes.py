@@ -656,12 +656,14 @@ async def verificar_assinatura(condominio_id: int, db: Session = Depends(get_db)
 
         # 2026-10-01: boleto atual (último não cancelado) pendente e já vencido
         ultimo_boleto = db.execute(text("""
-            SELECT status, data_vencimento FROM cobrancas
+            SELECT status, data_vencimento, asaas_payment_id FROM cobrancas
             WHERE id_condominio = :id AND LOWER(status) NOT IN ('cancelada', 'cancelado')
             ORDER BY data_vencimento DESC, id_cobranca DESC LIMIT 1
         """), {"id": condominio_id}).fetchone()
         boleto_vencido = bool(ultimo_boleto and (ultimo_boleto.status or '').lower() in ('pendente', 'pending')
                               and ultimo_boleto.data_vencimento and ultimo_boleto.data_vencimento < date.today())
+        link_boleto_vencido = (gerar_link_pagamento(ultimo_boleto.asaas_payment_id)
+                               if boleto_vencido and ultimo_boleto.asaas_payment_id else None)
 
         if cobranca and cobranca.asaas_payment_id:
             asaas_payment_id = cobranca.asaas_payment_id
@@ -679,6 +681,7 @@ async def verificar_assinatura(condominio_id: int, db: Session = Depends(get_db)
             "total_unidades":     total_unidades,
             "tem_boleto_pendente": tem_boleto,
             "boleto_vencido":     boleto_vencido,
+            "link_boleto_vencido": link_boleto_vencido,
             "situacao":           situacao,
             "rotulo":             sit["rotulo"],
             "alertas":            sit["alertas"],
