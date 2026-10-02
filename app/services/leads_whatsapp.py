@@ -7,7 +7,8 @@
 #            send-chat, com ZAPI_API_URL/ZAPI_INSTANCE_ID/ZAPI_TOKEN do .env.
 #            Só envio individual (WhatsApp Web pode bloquear o número em envio em massa).
 #            Quem chama já validou permissão (master no admin; usuário interno no financeiro).
-# VERSÃO: 1.0.0 - criação
+# VERSÃO: 1.1.0 - conversa e mídia lidas da tabela leads_mensagens (getChats do WA Web quebrado) (2026-10-02)
+#         1.0.0 - criação
 # data criação: 2026-10-02 data alteração: 2026-10-02
 # ============================================================================
 import logging
@@ -61,17 +62,22 @@ def _lead(db, lead_id):
     return row
 
 
-def conversa(lead_id: int, limite: int = 60) -> dict:
+def conversa(lead_id: int, limite: int = 200) -> dict:
+    """v1.1: lê o histórico gravado pelo servidor de WhatsApp (tabela leads_mensagens)."""
     db = SessionLocal()
     try:
         lead = _lead(db, lead_id)
-        j = _chamar("GET", "/chat-messages", params={"chatId": lead.whatsapp_chat_id or "", "phone": lead.whatsapp, "limit": limite})
-        if j.get("chatId") and j["chatId"] != lead.whatsapp_chat_id:
-            db.execute(text("UPDATE leads SET whatsapp_chat_id = :c WHERE id = :i"), {"c": j["chatId"], "i": lead_id})
-            db.commit()
-        msgs = [{**m, "data_hora": datetime.fromtimestamp(m["timestamp"]).isoformat() if m.get("timestamp") else None}
-                for m in j.get("messages", [])]
-        return {"lead_id": lead_id, "chat_id": j.get("chatId"), "mensagens": msgs}
+        if not lead.whatsapp_chat_id:
+            return {"lead_id": lead_id, "chat_id": None, "mensagens": [],
+                    "aviso": "Conversa registrada a partir de 02/10/2026 — aparece quando o cliente mandar a próxima mensagem."}
+        rows = db.execute(text("""
+            SELECT * FROM (SELECT msg_id, from_me, tipo, corpo, midia_mime IS NOT NULL AS tem_midia, enviado_em, id
+                           FROM leads_mensagens WHERE chat_id = :c ORDER BY enviado_em DESC, id DESC LIMIT :lim) x
+            ORDER BY enviado_em, id"""), {"c": lead.whatsapp_chat_id, "lim": limite}).fetchall()
+        return {"lead_id": lead_id, "chat_id": lead.whatsapp_chat_id, "mensagens": [{
+            "id": r.msg_id, "fromMe": bool(r.from_me), "type": r.tipo, "body": r.corpo or "",
+            "hasMedia": bool(r.tem_midia), "data_hora": r.enviado_em.isoformat() if r.enviado_em else None,
+        } for r in rows]}
     finally:
         db.close()
 
@@ -80,14 +86,13 @@ def midia(lead_id: int, msg_id: str) -> dict:
     db = SessionLocal()
     try:
         lead = _lead(db, lead_id)
-        # a mensagem precisa ser desta conversa (impede baixar mídia de outra conversa pelo id)
-        chat = (lead.whatsapp_chat_id or "").split("@")[0]
-        if not chat or chat not in msg_id:
-            raise HTTPException(status_code=403, detail="Mídia de outra conversa")
+        r = db.execute(text("SELECT midia_mime, midia_nome, midia_dados FROM leads_mensagens WHERE msg_id = :m AND chat_id = :c"),
+                       {"m": msg_id, "c": lead.whatsapp_chat_id or ""}).fetchone()
+        if not r or not r.midia_dados:
+            raise HTTPException(status_code=404, detail="Mídia não encontrada nesta conversa")
+        return {"mimetype": r.midia_mime, "filename": r.midia_nome, "data": r.midia_dados}
     finally:
         db.close()
-    j = _chamar("GET", f"/message-media/{msg_id}")
-    return {"mimetype": j.get("mimetype"), "filename": j.get("filename"), "data": j.get("data")}
 
 
 def responder(lead_id: int, mensagem: str, operador: str) -> dict:

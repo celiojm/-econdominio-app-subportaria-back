@@ -479,3 +479,62 @@ async def criar_lead_whatsapp(data: LeadWhatsAppRequest, request: Request):
             logger.warning("Lead WhatsApp: chat_id não gravado: %s", e)
 
     return {"ok": True, "id": resultado["id"]}
+
+
+# ─── 2026-10-02: histórico das conversas do WhatsApp do funil (painel do lead) ─────────
+class LeadMensagemRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    msg_id: str
+    chat_id: str
+    from_me: bool = False
+    tipo: str = "chat"
+    corpo: Optional[str] = None
+    timestamp: int
+    midia_mime: Optional[str] = None
+    midia_nome: Optional[str] = None
+    midia_dados: Optional[str] = None
+
+    @field_validator("chat_id")
+    @classmethod
+    def _v_chat(cls, v):
+        if not re.fullmatch(r"[0-9]{5,25}@(c\.us|lid)", v or ""):
+            raise ValueError("chat_id inválido")
+        return v
+
+    @field_validator("msg_id")
+    @classmethod
+    def _v_msg(cls, v):
+        if not v or len(v) > 160:
+            raise ValueError("msg_id inválido")
+        return v
+
+    @field_validator("tipo")
+    @classmethod
+    def _v_tipo(cls, v):
+        return v if v in ("chat", "ptt", "audio", "image", "video", "document", "sticker") else "chat"
+
+
+@router.post("/whatsapp/mensagem")
+async def registrar_mensagem_whatsapp(data: LeadMensagemRequest, request: Request):
+    token_recebido = request.headers.get("x-lead-token", "")
+    if not LEADS_WHATSAPP_TOKEN or not hmac.compare_digest(token_recebido, LEADS_WHATSAPP_TOKEN):
+        raise HTTPException(status_code=403, detail="acesso negado")
+    if extrair_ip_real(request) != LEADS_WHATSAPP_IP_PERMITIDO:
+        raise HTTPException(status_code=403, detail="acesso negado")
+    dados = data.midia_dados if data.midia_dados and len(data.midia_dados) <= 7 * 1024 * 1024 else None
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT IGNORE INTO leads_mensagens (msg_id, chat_id, from_me, tipo, corpo, midia_mime, midia_nome, midia_dados, enviado_em)
+            VALUES (:m, :c, :f, :t, :b, :mm, :mn, :md, FROM_UNIXTIME(:ts))"""),
+            {"m": data.msg_id, "c": data.chat_id, "f": 1 if data.from_me else 0, "t": data.tipo,
+             "b": (data.corpo or "")[:4000] or None, "mm": (data.midia_mime or "")[:100] if dados else None,
+             "mn": (data.midia_nome or "")[:255] or None if dados else None, "md": dados, "ts": data.timestamp})
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Erro ao gravar mensagem do whatsapp")
+        raise HTTPException(status_code=500, detail="Erro ao processar.")
+    finally:
+        db.close()
+    return {"ok": True}
