@@ -38,7 +38,8 @@ def _headers():
 
 def _chamar(metodo, caminho, **kw):
     try:
-        r = httpx.request(metodo, _base() + caminho, headers=_headers(), timeout=40, **kw)
+        # 75s: o servidor de WhatsApp espera até 60s pela confirmação do envio
+        r = httpx.request(metodo, _base() + caminho, headers=_headers(), timeout=75, **kw)
     except httpx.HTTPError as e:
         logger.warning("leads_whatsapp: servidor de WhatsApp indisponível: %s", type(e).__name__)
         raise HTTPException(status_code=503, detail="Servidor de WhatsApp indisponível")
