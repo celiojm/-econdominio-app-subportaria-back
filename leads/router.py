@@ -494,6 +494,7 @@ class LeadMensagemRequest(BaseModel):
     midia_nome: Optional[str] = None
     midia_dados: Optional[str] = None
     bot: bool = False   # 2026-10-02: enviada pelo robô do funil
+    telefone: Optional[str] = None   # 2026-10-02: telefone de quem escreveu (liga a conversa ao lead)
 
     @field_validator("chat_id")
     @classmethod
@@ -531,6 +532,17 @@ async def registrar_mensagem_whatsapp(data: LeadMensagemRequest, request: Reques
             {"m": data.msg_id, "c": data.chat_id, "f": 1 if data.from_me else 0, "bot": 1 if data.bot else 0, "t": data.tipo,
              "b": (data.corpo or "")[:4000] or None, "mm": (data.midia_mime or "")[:100] if dados else None,
              "mn": (data.midia_nome or "")[:255] or None if dados else None, "md": dados, "ts": data.timestamp})
+        # 2026-10-02: cliente escreveu — liga esta conversa ao lead do mesmo telefone (cadastro manual,
+        # ou WhatsApp que trocou @c.us por @lid) e move o histórico antigo para o id novo
+        if not data.from_me and data.telefone:
+            canon = normalizar_whatsapp_br(data.telefone)
+            lead = db.execute(text("SELECT id, whatsapp_chat_id FROM leads WHERE whatsapp = :w"), {"w": canon}).fetchone() if canon else None
+            if lead and lead.whatsapp_chat_id != data.chat_id:
+                db.execute(text("UPDATE leads SET whatsapp_chat_id = :c WHERE id = :i"), {"c": data.chat_id, "i": lead.id})
+                if lead.whatsapp_chat_id:
+                    db.execute(text("UPDATE leads_mensagens SET chat_id = :c WHERE chat_id = :o"),
+                               {"c": data.chat_id, "o": lead.whatsapp_chat_id})
+                logger.info("Lead %s ligado à conversa do WhatsApp", lead.id)
         db.commit()
     except Exception:
         db.rollback()

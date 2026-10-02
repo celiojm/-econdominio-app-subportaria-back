@@ -214,3 +214,11 @@ async def agendar_lead(lead_id: int, dados: _AgendaLead, current_user: dict = De
     operador = _so_master(current_user)
     from app.services.leads_whatsapp import agendar
     return agendar(lead_id, dados.data_agendamento, dados.anotacao, operador)
+
+
+@router.post("/leads")
+async def criar_lead_manual(dados: dict, current_user: dict = Depends(get_current_user)):
+    """2026-10-02: cadastro manual de lead (só admin_sistema)."""
+    operador = _so_master(current_user)
+    from app.services.leads_whatsapp import criar_manual
+    return criar_manual(dados, operador)

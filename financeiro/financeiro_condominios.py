@@ -1025,3 +1025,10 @@ async def agenda_leads(status: str = Query("pendente"), quem: dict = Depends(_us
 async def atualizar_agenda_lead(ag_id: int, dados: dict, quem: dict = Depends(_usuario_interno)):
     from app.services.leads_whatsapp import atualizar_agendamento
     return atualizar_agendamento(ag_id, str(dados.get("status") or ""), _nome_interno(quem))
+
+
+@router.post("/leads-site")
+async def criar_lead_site(dados: dict, quem: dict = Depends(_usuario_interno)):
+    """2026-10-02: cadastro manual de lead pelo financeiro."""
+    from app.services.leads_whatsapp import criar_manual
+    return criar_manual(dados, _nome_interno(quem))

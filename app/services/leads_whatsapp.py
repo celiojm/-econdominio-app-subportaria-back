@@ -181,3 +181,37 @@ def atualizar_agendamento(ag_id: int, status: str, operador: str) -> dict:
         return {"success": True}
     finally:
         db.close()
+
+
+def criar_manual(dados: dict, operador: str) -> dict:
+    """2026-10-02: cadastro manual de lead (contatos anteriores ao funil). Origem 'manual'."""
+    from leads.validators import normalizar_whatsapp_br
+    nome = (dados.get("nome") or "").strip()[:120]
+    canon = normalizar_whatsapp_br(str(dados.get("whatsapp") or ""))
+    if not nome:
+        raise HTTPException(status_code=422, detail="Informe o nome")
+    if not canon:
+        raise HTTPException(status_code=422, detail="WhatsApp inválido (celular com DDD)")
+    status = dados.get("status") or "contatado"
+    if status not in ("novo", "contatado", "em_negociacao", "convertido", "perdido"):
+        raise HTTPException(status_code=422, detail="Status inválido")
+    cnpj = "".join(c for c in str(dados.get("cnpj") or "") if c.isdigit())[:14] or None
+    obs = (dados.get("observacao") or "").strip()[:2000]
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    historico = f"[{agora}] Cadastrado manualmente por {operador}" + (f": {obs}" if obs else "")
+    db = SessionLocal()
+    try:
+        ja = db.execute(text("SELECT id FROM leads WHERE whatsapp = :w"), {"w": canon}).fetchone()
+        if ja:
+            raise HTTPException(status_code=409, detail=f"Já existe o lead #{ja.id} com este WhatsApp")
+        r = db.execute(text("""
+            INSERT INTO leads (nome, whatsapp, cnpj, razao_social, cidade, origem, status, ref, observacao,
+                               total_contatos, ultimo_contato_em)
+            VALUES (:n, :w, :cnpj, :rs, :cid, 'manual', :st, :ref, :obs, 1, NOW())"""),
+            {"n": nome, "w": canon, "cnpj": cnpj, "rs": (dados.get("razao_social") or "").strip()[:200] or None,
+             "cid": (dados.get("cidade") or "").strip()[:100] or None, "st": status,
+             "ref": (dados.get("campanha") or "").strip()[:100] or None, "obs": historico})
+        db.commit()
+        return {"success": True, "id": r.lastrowid}
+    finally:
+        db.close()
