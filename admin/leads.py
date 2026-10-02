@@ -76,7 +76,12 @@ async def listar_leads(
                 f"""
                 SELECT id, nome, whatsapp, cnpj, razao_social, cidade, origem, status,
                        utm_source, utm_medium, utm_campaign, utm_content, ref,
-                       total_contatos, ultimo_contato_em, observacao, criado_em
+                       total_contatos, ultimo_contato_em, observacao, criado_em,
+                       -- 2026-10-02: cliente mandou mensagem e nenhuma PESSOA respondeu depois (robô não conta)
+                       CASE WHEN whatsapp_chat_id IS NULL THEN 0 ELSE COALESCE(
+                         (SELECT MAX(m.enviado_em) FROM leads_mensagens m WHERE m.chat_id = leads.whatsapp_chat_id AND m.from_me = 0)
+                         > COALESCE((SELECT MAX(m.enviado_em) FROM leads_mensagens m WHERE m.chat_id = leads.whatsapp_chat_id
+                                     AND m.from_me = 1 AND m.bot = 0), '1970-01-01'), 0) END AS aguardando_resposta
                 FROM leads {where_sql}
                 ORDER BY ultimo_contato_em DESC
                 LIMIT %s OFFSET %s
@@ -105,6 +110,7 @@ async def listar_leads(
                         "ultimo_contato_em": str(l["ultimo_contato_em"]) if l["ultimo_contato_em"] else None,
                         "observacao": l["observacao"],
                         "criado_em": str(l["criado_em"]) if l["criado_em"] else None,
+                        "aguardando_resposta": bool(l.get("aguardando_resposta")),
                     }
                     for l in leads
                 ],

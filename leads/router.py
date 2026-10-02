@@ -493,6 +493,7 @@ class LeadMensagemRequest(BaseModel):
     midia_mime: Optional[str] = None
     midia_nome: Optional[str] = None
     midia_dados: Optional[str] = None
+    bot: bool = False   # 2026-10-02: enviada pelo robô do funil
 
     @field_validator("chat_id")
     @classmethod
@@ -525,9 +526,9 @@ async def registrar_mensagem_whatsapp(data: LeadMensagemRequest, request: Reques
     db = SessionLocal()
     try:
         db.execute(text("""
-            INSERT IGNORE INTO leads_mensagens (msg_id, chat_id, from_me, tipo, corpo, midia_mime, midia_nome, midia_dados, enviado_em)
-            VALUES (:m, :c, :f, :t, :b, :mm, :mn, :md, FROM_UNIXTIME(:ts))"""),
-            {"m": data.msg_id, "c": data.chat_id, "f": 1 if data.from_me else 0, "t": data.tipo,
+            INSERT IGNORE INTO leads_mensagens (msg_id, chat_id, from_me, bot, tipo, corpo, midia_mime, midia_nome, midia_dados, enviado_em)
+            VALUES (:m, :c, :f, :bot, :t, :b, :mm, :mn, :md, FROM_UNIXTIME(:ts))"""),
+            {"m": data.msg_id, "c": data.chat_id, "f": 1 if data.from_me else 0, "bot": 1 if data.bot else 0, "t": data.tipo,
              "b": (data.corpo or "")[:4000] or None, "mm": (data.midia_mime or "")[:100] if dados else None,
              "mn": (data.midia_nome or "")[:255] or None if dados else None, "md": dados, "ts": data.timestamp})
         db.commit()
