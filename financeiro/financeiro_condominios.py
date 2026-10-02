@@ -984,3 +984,44 @@ async def leads_site(
 async def atualizar_lead_site(lead_id: int, dados: dict, quem: dict = Depends(_usuario_interno)):
     from admin.leads import atualizar_lead, AtualizarLeadRequest
     return await atualizar_lead(lead_id, AtualizarLeadRequest(**dados), current_user={"role": "admin_sistema"})
+
+
+# ─── 2026-10-02: conversa do lead e agendamentos de lead (Agenda) — usuário interno ─────
+def _nome_interno(quem):
+    return (quem or {}).get("nome") or (quem or {}).get("username") or (quem or {}).get("email") or "financeiro"
+
+
+@router.get("/leads-site/{lead_id}/conversa")
+async def conversa_lead_site(lead_id: int, quem: dict = Depends(_usuario_interno)):
+    from app.services.leads_whatsapp import conversa
+    return conversa(lead_id)
+
+
+@router.get("/leads-site/{lead_id}/midia/{msg_id}")
+async def midia_lead_site(lead_id: int, msg_id: str, quem: dict = Depends(_usuario_interno)):
+    from app.services.leads_whatsapp import midia
+    return midia(lead_id, msg_id)
+
+
+@router.post("/leads-site/{lead_id}/responder")
+async def responder_lead_site(lead_id: int, dados: dict, quem: dict = Depends(_usuario_interno)):
+    from app.services.leads_whatsapp import responder
+    return responder(lead_id, str(dados.get("mensagem") or ""), _nome_interno(quem))
+
+
+@router.post("/leads-site/{lead_id}/agendar")
+async def agendar_lead_site(lead_id: int, dados: dict, quem: dict = Depends(_usuario_interno)):
+    from app.services.leads_whatsapp import agendar
+    return agendar(lead_id, str(dados.get("data_agendamento") or ""), dados.get("anotacao"), _nome_interno(quem))
+
+
+@router.get("/leads-agenda")
+async def agenda_leads(status: str = Query("pendente"), quem: dict = Depends(_usuario_interno)):
+    from app.services.leads_whatsapp import agenda
+    return agenda(status)
+
+
+@router.put("/leads-agenda/{ag_id}")
+async def atualizar_agenda_lead(ag_id: int, dados: dict, quem: dict = Depends(_usuario_interno)):
+    from app.services.leads_whatsapp import atualizar_agendamento
+    return atualizar_agendamento(ag_id, str(dados.get("status") or ""), _nome_interno(quem))

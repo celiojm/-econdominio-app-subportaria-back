@@ -14,6 +14,7 @@
 # data criação: 2026-09-15   data alteração: 2026-09-15
 # ============================================================================
 
+import re  # 2026-10-02: validação do chat_id
 import hmac
 import logging
 import os
@@ -164,6 +165,13 @@ class LeadWhatsAppRequest(BaseModel):
     cnpj: Optional[str] = None
     etapa: Optional[str] = None
     razao_social: Optional[str] = None
+    chat_id: Optional[str] = None   # 2026-10-02: id da conversa no WhatsApp (ex.: ...@lid)
+
+    @field_validator("chat_id")
+    @classmethod
+    def _v_chat_id(cls, v):
+        # formato inesperado não recusa o lead — só descarta o campo
+        return v if v and re.fullmatch(r"[0-9]{5,25}@(c\.us|lid)", v) else None
 
     @field_validator("nome")
     @classmethod
@@ -460,5 +468,14 @@ async def criar_lead_whatsapp(data: LeadWhatsAppRequest, request: Request):
     except Exception:
         logger.exception("Erro ao gravar lead do whatsapp")
         raise HTTPException(status_code=500, detail="Erro ao processar.")
+
+    if data.chat_id:
+        # 2026-10-02: guarda a conversa para o painel (falha aqui nunca perde o lead)
+        try:
+            _db = SessionLocal()
+            _db.execute(text("UPDATE leads SET whatsapp_chat_id = :c WHERE id = :i"), {"c": data.chat_id, "i": resultado["id"]})
+            _db.commit(); _db.close()
+        except Exception as e:
+            logger.warning("Lead WhatsApp: chat_id não gravado: %s", e)
 
     return {"ok": True, "id": resultado["id"]}

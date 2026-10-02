@@ -162,3 +162,49 @@ async def atualizar_lead(
         return {"success": True}
     finally:
         conn.close()
+
+
+# ─── 2026-10-02: conversa do lead pelo painel + agendamento (só admin_sistema) ──────────
+class _RespostaLead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mensagem: str
+
+
+class _AgendaLead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data_agendamento: str          # AAAA-MM-DDTHH:MM
+    anotacao: Optional[str] = None
+
+
+def _so_master(current_user):
+    if current_user.get("role") != "admin_sistema":
+        raise HTTPException(status_code=403, detail="Apenas admin_sistema")
+    return current_user.get("nome") or current_user.get("username") or "admin"
+
+
+@router.get("/leads/{lead_id}/conversa")
+async def conversa_lead(lead_id: int, current_user: dict = Depends(get_current_user)):
+    _so_master(current_user)
+    from app.services.leads_whatsapp import conversa
+    return conversa(lead_id)
+
+
+@router.get("/leads/{lead_id}/midia/{msg_id}")
+async def midia_lead(lead_id: int, msg_id: str, current_user: dict = Depends(get_current_user)):
+    _so_master(current_user)
+    from app.services.leads_whatsapp import midia
+    return midia(lead_id, msg_id)
+
+
+@router.post("/leads/{lead_id}/responder")
+async def responder_lead(lead_id: int, dados: _RespostaLead, current_user: dict = Depends(get_current_user)):
+    operador = _so_master(current_user)
+    from app.services.leads_whatsapp import responder
+    return responder(lead_id, dados.mensagem, operador)
+
+
+@router.post("/leads/{lead_id}/agendar")
+async def agendar_lead(lead_id: int, dados: _AgendaLead, current_user: dict = Depends(get_current_user)):
+    operador = _so_master(current_user)
+    from app.services.leads_whatsapp import agendar
+    return agendar(lead_id, dados.data_agendamento, dados.anotacao, operador)
