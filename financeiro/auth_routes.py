@@ -437,6 +437,11 @@ async def atualizar_usuario(
             detail="Usuário não encontrado"
         )
     
+    # 2026-10-04: o master não pode tirar o próprio acesso (ficaria sem ninguém para administrar)
+    if user.id == admin.id and ((data.tipo is not None and data.tipo != "admin") or data.ativo is False):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Você não pode rebaixar nem desativar o seu próprio usuário")
+
     if data.nome is not None:
         user.nome = data.nome
     if data.tipo is not None:
@@ -453,6 +458,8 @@ async def atualizar_usuario(
             auth_service.revoke_all_user_tokens(db, user.id)
     
     db.commit()
+    if data.nova_senha:
+        auth_service.update_user_password(db, user, data.nova_senha)  # derruba as sessões do usuário
     
     return {"success": True, "user": user.to_dict()}
 

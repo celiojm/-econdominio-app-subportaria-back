@@ -33,6 +33,7 @@
 
 import math
 import logging
+from app.services.protecao_financeiro import nome_usuario_atual  # 2026-10-04: colaborador logado
 from datetime import datetime
 from typing import Optional, Any
 
@@ -562,7 +563,7 @@ async def registrar_contato(lead_id: int, body: ContatoCreate, db: Session = Dep
             "resultado":         body.resultado,
             "observacoes":       body.observacoes,
             "pessoa_contactada": body.pessoa_contactada,
-            "operador_nome":     body.operador_nome,
+            "operador_nome":     nome_usuario_atual(body.operador_nome),
             "data_agendamento":  _parse_dt(body.data_agendamento),
         })
         contato_id = result.lastrowid

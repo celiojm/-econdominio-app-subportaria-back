@@ -7,6 +7,7 @@ DATA CRIAÇÃO: 11/02/2026
 VERSÃO: 2.2.0 - Correção do INSERT em condominios (bug campos duplicados/errados)
 ================================================================================
 """
+from app.services.protecao_financeiro import nome_usuario_atual  # 2026-10-04: colaborador logado
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -580,7 +581,7 @@ async def criar_contato(
                 (:id_condominio, :operador_nome, :pessoa_contactada, :tipo_contato,
                  :assunto, :descricao, :resultado, :observacoes, :data_agendamento)
         """), {
-            "id_condominio": id_condominio, "operador_nome": operador_nome,
+            "id_condominio": id_condominio, "operador_nome": nome_usuario_atual(operador_nome),
             "pessoa_contactada": dados.pessoa_contactada, "tipo_contato": dados.tipo_contato,
             "assunto": dados.assunto, "descricao": dados.descricao,
             "resultado": dados.resultado, "observacoes": dados.observacoes,

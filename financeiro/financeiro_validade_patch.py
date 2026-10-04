@@ -17,6 +17,7 @@ Cole este conteúdo no FINAL do arquivo financeiro_condominios.py
 # from datetime import date, timedelta, datetime
 # import os
 
+from app.services.protecao_financeiro import nome_usuario_atual  # 2026-10-04: colaborador logado
 from datetime import date, timedelta, datetime
 import os
 from pydantic import BaseModel
@@ -102,7 +103,7 @@ async def ajustar_validade(
             validade_nova  = nova_validade,
             dias           = body.dias,
             motivo         = body.motivo,
-            operador       = body.operador,
+            operador       = nome_usuario_atual(body.operador),
         )
 
         dias_restantes = (nova_validade - date.today()).days
@@ -110,7 +111,7 @@ async def ajustar_validade(
         logger.info(
             f"Validade ajustada: cond={id_condominio} | "
             f"{validade_atual} → {nova_validade} ({body.dias:+d} dias) | "
-            f"op={body.operador}"
+            f"op={nome_usuario_atual(body.operador)}"
         )
 
         return {

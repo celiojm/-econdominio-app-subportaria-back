@@ -7,6 +7,7 @@
 #  VERSÃO: 2.1.0 - Com correção de campos inteiros
 # ================================================================================
 
+from app.services.protecao_financeiro import nome_usuario_atual  # 2026-10-04: colaborador logado
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -773,7 +774,7 @@ async def ajustar_validade(
     from datetime import date, timedelta
     dias     = int(payload.get("dias", 0))
     motivo   = payload.get("motivo", "")
-    operador = payload.get("operador", "")
+    operador = nome_usuario_atual(payload.get("operador", ""))  # 2026-10-04: usuário logado
 
     if dias == 0:
         raise HTTPException(status_code=400, detail="Informe valor diferente de zero.")
@@ -908,7 +909,7 @@ async def registrar_contato_condominio(id_condominio: int, dados: ContatoCondomi
             (condominio_id, operador_id, operador_nome, pessoa_contato, data_contato, resumo,
              data_agendamento, agendamento_status)
         VALUES (:c, :oid, :onome, :pessoa, :dc, :resumo, :ag, :st)
-    """), {"c": id_condominio, "oid": operador_id, "onome": dados.operador_nome.strip()[:150],
+    """), {"c": id_condominio, "oid": operador_id, "onome": (quem.get("nome") or dados.operador_nome).strip()[:150],
            "pessoa": dados.pessoa_contato.strip()[:150], "dc": data_contato,
            "resumo": dados.resumo.strip(), "ag": agenda, "st": "pendente" if agenda else None})
     db.commit()
@@ -1032,3 +1033,91 @@ async def criar_lead_site(dados: dict, quem: dict = Depends(_usuario_interno)):
     """2026-10-02: cadastro manual de lead pelo financeiro."""
     from app.services.leads_whatsapp import criar_manual
     return criar_manual(dados, _nome_interno(quem))
+
+
+# ─── 2026-10-04: painel do colaborador (venda e suporte — SEM dados financeiros da empresa) ─────
+def _qtd(db, sql, p=None):
+    try:
+        return int(db.execute(text(sql), p or {}).scalar() or 0)
+    except Exception as e:
+        logger.warning("painel colaborador: %s", e)
+        return 0
+
+
+def _linhas(db, sql, p=None):
+    try:
+        return [dict(r._mapping) for r in db.execute(text(sql), p or {})]
+    except Exception as e:
+        logger.warning("painel colaborador: %s", e)
+        return []
+
+
+def _iso(v):
+    return v.isoformat() if hasattr(v, "isoformat") else v
+
+
+@router.get("/colaborador/painel")
+async def painel_colaborador(quem: dict = Depends(_usuario_interno), db: Session = Depends(get_db)):
+    eu = quem.get("nome") or ""
+    AGUARDANDO = """(l.whatsapp_chat_id IS NOT NULL AND COALESCE(
+        (SELECT MAX(m.enviado_em) FROM leads_mensagens m WHERE m.chat_id = l.whatsapp_chat_id AND m.from_me = 0)
+        > COALESCE((SELECT MAX(m.enviado_em) FROM leads_mensagens m WHERE m.chat_id = l.whatsapp_chat_id
+                    AND m.from_me = 1 AND m.bot = 0), '1970-01-01'), 0))"""
+    resumo = {
+        "leads_novos": _qtd(db, "SELECT COUNT(*) FROM leads WHERE status = 'novo'"),
+        "leads_aguardando_resposta": _qtd(db, f"SELECT COUNT(*) FROM leads l WHERE {AGUARDANDO}"),
+        "prospects_interessados": _qtd(db, "SELECT COUNT(*) FROM marketing_leads WHERE status IN ('interessado','em_contato')"),
+        "cadastros_site_pendentes": _qtd(db, "SELECT COUNT(*) FROM contato_condominios WHERE status IN ('pendente','a_recuperar')"),
+        "teste_vencendo_7d": _qtd(db, """SELECT COUNT(*) FROM condominios WHERE ativo = 1
+            AND situacao_assinatura IN ('em_teste','teste_estendido','cadastro_incompleto')
+            AND validade_ate BETWEEN CURDATE() AND CURDATE() + INTERVAL 7 DAY"""),
+        "cadastro_incompleto": _qtd(db, "SELECT COUNT(*) FROM condominios WHERE ativo = 1 AND situacao_assinatura = 'cadastro_incompleto'"),
+    }
+    # agenda: atrasados (até 15 dias), hoje e próximos 7 dias — todas as origens
+    agenda = _linhas(db, """
+        SELECT * FROM (
+          SELECT 'lead' AS origem, a.id, a.data_agendamento AS quando, COALESCE(l.nome, 'Lead sem nome') AS quem,
+                 a.anotacao AS assunto, a.operador_nome, '/financeiro/leads' AS link
+            FROM leads_agendamentos a JOIN leads l ON l.id = a.lead_id WHERE a.status = 'pendente'
+          UNION ALL
+          SELECT 'condominio', cc.id, cc.data_agendamento, c.nome, cc.resumo, cc.operador_nome,
+                 CONCAT('/financeiro/condominios/', cc.condominio_id, '/dashboard')
+            FROM condominio_contatos cc JOIN condominios c ON c.id = cc.condominio_id
+           WHERE cc.agendamento_status = 'pendente' AND cc.data_agendamento IS NOT NULL
+          UNION ALL
+          SELECT 'cadastro_site', ct.id, ct.data_agendamento, COALESCE(cs.nome_fantasia, cs.razao_social), ct.assunto,
+                 ct.operador_nome, '/financeiro/agenda'
+            FROM contatos_condominios ct JOIN contato_condominios cs ON cs.id = ct.id_condominio
+           WHERE ct.data_agendamento IS NOT NULL
+          UNION ALL
+          SELECT 'marketing', mc.id, mc.data_agendamento, COALESCE(ml.nome_fantasia, ml.nome), mc.assunto,
+                 mc.operador_nome, '/financeiro/marketing'
+            FROM marketing_contatos mc JOIN marketing_leads ml ON ml.id = mc.lead_id
+           WHERE mc.data_agendamento IS NOT NULL
+        ) x
+        WHERE quando BETWEEN NOW() - INTERVAL 15 DAY AND CURDATE() + INTERVAL 8 DAY
+        ORDER BY quando ASC LIMIT 60""")
+    for a in agenda:
+        a["quando"] = _iso(a["quando"])
+    leads = _linhas(db, f"""
+        SELECT l.id, l.nome, l.whatsapp, l.cidade, l.status, l.ultimo_contato_em,
+               (SELECT MAX(m.enviado_em) FROM leads_mensagens m WHERE m.chat_id = l.whatsapp_chat_id AND m.from_me = 0) AS ultima_msg_cliente
+          FROM leads l WHERE {AGUARDANDO} ORDER BY ultima_msg_cliente ASC LIMIT 15""")
+    for l in leads:
+        l["ultimo_contato_em"] = _iso(l["ultimo_contato_em"]); l["ultima_msg_cliente"] = _iso(l["ultima_msg_cliente"])
+    teste = _linhas(db, """
+        SELECT id, nome, cidade, situacao_assinatura, validade_ate, DATEDIFF(validade_ate, CURDATE()) AS dias
+          FROM condominios WHERE ativo = 1 AND situacao_assinatura IN ('em_teste','teste_estendido','cadastro_incompleto')
+           AND validade_ate BETWEEN CURDATE() AND CURDATE() + INTERVAL 7 DAY
+         ORDER BY validade_ate ASC LIMIT 20""")
+    for t in teste:
+        t["validade_ate"] = _iso(t["validade_ate"])
+    p = {"eu": eu}
+    meus = {
+        "cadastros_site": _qtd(db, "SELECT COUNT(*) FROM contatos_condominios WHERE operador_nome = :eu AND DATE(data_contato) = CURDATE()", p),
+        "condominios": _qtd(db, "SELECT COUNT(*) FROM condominio_contatos WHERE operador_nome = :eu AND DATE(data_contato) = CURDATE()", p),
+        "marketing": _qtd(db, "SELECT COUNT(*) FROM marketing_contatos WHERE operador_nome = :eu AND DATE(created_at) = CURDATE()", p),
+        "agendamentos_leads": _qtd(db, "SELECT COUNT(*) FROM leads_agendamentos WHERE operador_nome = :eu AND DATE(criado_em) = CURDATE()", p),
+    }
+    return {"usuario": {"nome": eu, "tipo": quem.get("tipo"), "master": quem.get("master")},
+            "resumo": resumo, "agenda": agenda, "leads_aguardando": leads, "teste_vencendo": teste, "meus_contatos_hoje": meus}

@@ -188,6 +188,7 @@ class UsuarioUpdate(BaseModel):
     nome: Optional[str] = None
     tipo: Optional[str] = None
     ativo: Optional[bool] = None
+    nova_senha: Optional[str] = Field(None, min_length=8)  # 2026-10-04: master redefine a senha
 
 
 class AlterarSenhaRequest(BaseModel):
