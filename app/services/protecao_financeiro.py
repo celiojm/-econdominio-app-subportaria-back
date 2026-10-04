@@ -11,7 +11,8 @@
 #            (dashboard financeiro, pagamentos, contas a pagar, previsão, afiliados) → 403.
 #            usuario_atual()/nome_usuario_atual(): quem está logado na requisição (para registrar o
 #            colaborador nos contatos — o nome vem do token, não da tela).
-# VERSÃO: 1.2.0 - níveis master/colaborador; usuário logado disponível às rotas (2026-10-04)
+# VERSÃO: 1.3.0 - token do admin com nivel_sistema=colaborador = colaborador também no financeiro (2026-10-04)
+#         1.2.0 - níveis master/colaborador; usuário logado disponível às rotas (2026-10-04)
 #         1.1.0 - dependência usuario_interno (rotas de NF aceitam token do financeiro)
 #         1.0.0 - criação (segurança, 2026-09-26)
 # data criação: 2026-09-26 data alteração: 2026-10-04
@@ -66,8 +67,9 @@ def ler_token_interno(token: str) -> Optional[dict]:
     except JWTError:
         return None
     if p.get("role") == "admin_sistema" or (p.get("sub") == "admin" and str(p.get("nivel")) == "1"):
+        colab = p.get("nivel_sistema") == "colaborador"
         return {"origem": "admin", "id": p.get("sub"), "nome": p.get("nome") or p.get("sub") or "admin",
-                "email": None, "tipo": "admin", "master": True}
+                "email": p.get("email"), "tipo": "operador" if colab else "admin", "master": not colab}
     return None
 
 

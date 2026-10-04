@@ -68,24 +68,28 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         logger.warning("❌ 422 em %s | %s", request.url.path,
                        [(".".join(str(x) for x in e.get("loc", [])[1:]), e.get("msg")) for e in exc.errors()])
         return JSONResponse(status_code=422, content={"detail": "dados inválidos"})
-    exc_str = f'{exc}'.replace('\n', ' ').replace('   ', ' ')
-    logger.error("=" * 80)
-    logger.error(f"❌ ERRO 422 - VALIDAÇÃO FALHOU")
-    logger.error(f"Request: {request.method} {request.url}")
-    logger.error(f"Detalhes: {exc_str}")
-    logger.error(f"Erros: {exc.errors()}")
-    logger.error(f"Body recebido: {exc.body}")
-    logger.error("=" * 80)
+    # 2026-10-04: NUNCA devolver/logar senha, token ou chave — a resposta não traz mais o corpo enviado
+    # nem o valor digitado ("input"); o log mostra o corpo com os campos sensíveis trocados por ***
+    import re as _re
+    _sens = _re.compile(r"senha|password|token|secret|hash|chave|key", _re.I)
+
+    def _mascarar(v):
+        if isinstance(v, dict):
+            return {k: ("***" if _sens.search(str(k)) else _mascarar(x)) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_mascarar(x) for x in v]
+        return v
+
+    erros = [{"loc": [str(x) for x in err.get("loc", [])], "msg": err.get("msg"), "type": err.get("type")}
+             for err in exc.errors()]
+    logger.error("❌ ERRO 422 - VALIDAÇÃO FALHOU | %s %s | erros=%s | body=%s", request.method,
+                 request.url.path, [(".".join(e["loc"][1:]), e["msg"]) for e in erros],
+                 str(_mascarar(exc.body))[:500])
 
     content = {
         'status_code': 422,
         'message': 'Erro de validação',
-        'detail': [
-            {k: str(v) if not isinstance(v, (str, int, float, bool, list)) else v
-             for k, v in err.items() if k != 'ctx'}
-            for err in exc.errors()
-        ],
-        'body': str(exc.body)[:500]
+        'detail': erros,
     }
 
     return JSONResponse(content=content, status_code=422)

@@ -15,6 +15,7 @@ from .whatsapp import router as whatsapp_router
 from .password_reset_routes import router as password_reset_router
 from .moradores_importacao import router as moradores_importacao_router
 from .leads import router as leads_admin_router
+from .usuarios_sistema import router as usuarios_sistema_router  # 2026-10-04
 
 # Router principal
 router = APIRouter()
@@ -27,6 +28,7 @@ router.include_router(whatsapp_router)  # Já tem prefix="/painel/whatsapp" inte
 router.include_router(password_reset_router, prefix="/painel")
 router.include_router(moradores_importacao_router, prefix="/painel")
 router.include_router(leads_admin_router, prefix="/painel")
+router.include_router(usuarios_sistema_router, prefix="/painel")  # 2026-10-04: Usuários do sistema (só master)
 
 # Endpoint de health check
 @router.get("/painel/health")

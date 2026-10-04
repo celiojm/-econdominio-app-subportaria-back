@@ -11,6 +11,7 @@
 #         de outros campos por sindico). Etapa 3, NFE_FINANCEIRO.md. Testado
 #         e provado antes deste deploy em dev2_back (arquitetura identica).
 # VERSÃO: 4.0.0 - Limpo, sem remendos
+# 2026-10-04: nível 'colaborador' (admin_sistema + nivel_sistema); só o master dá/altera níveis de sistema
 # Roles: admin_sistema, sindico, operador, porteiro
 # ========================================
 
@@ -30,7 +31,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 DIAS_BONIFICADOS = 7
-ROLES_VALIDOS = ['admin_sistema', 'sindico', 'operador', 'porteiro']
+ROLES_VALIDOS = ['admin_sistema', 'colaborador', 'sindico', 'operador', 'porteiro']
+# 2026-10-04: 'colaborador' = equipe do sistema. No banco fica role='admin_sistema' + nivel_sistema='colaborador'
+# (acessa o mesmo que o admin do sistema; rotinas só do colaborador usam nivel_sistema). Só o MASTER dá ou
+# altera os níveis admin_sistema/colaborador.
+NIVEIS_SISTEMA = ('admin_sistema', 'colaborador')
+
+
+def _role_publico(op: dict) -> str:
+    if op.get('role') == 'admin_sistema' and op.get('nivel_sistema') == 'colaborador':
+        return 'colaborador'
+    return op.get('role')
+
+
+def _exigir_master_para(current_user: dict, motivo: str):
+    from app.services.nivel_sistema import eh_master_sistema
+    if not eh_master_sistema(current_user):
+        raise HTTPException(status_code=403, detail=f"Só o master pode {motivo}")
 
 
 # ============================================================================
@@ -618,7 +635,7 @@ async def listar_operadores(current_user: dict = Depends(get_current_user)):
                     "telefone": op['telefone'],
                     "condominio_id": op['condominio_id'],
                     "condominio_nome": op.get('condominio_nome', ''),
-                    "role": op['role'],
+                    "role": _role_publico(op),
                     "nivel_id": op['nivel_id'],
                     "ativo": bool(op['ativo']),
                     "email_verificado": bool(op.get('email_verificado', False)),
@@ -730,7 +747,7 @@ async def obter_operador(operador_id: int, current_user: dict = Depends(get_curr
                 "telefone": op['telefone'],
                 "condominio_id": op['condominio_id'],
                 "condominio_nome": op.get('condominio_nome', ''),
-                "role": op['role'],
+                "role": _role_publico(op),
                 "nivel_id": op['nivel_id'],
                 "ativo": bool(op['ativo']),
                 "email_verificado": bool(op.get('email_verificado', False)),
@@ -758,13 +775,18 @@ async def criar_operador(data: OperadorCreate, current_user: dict = Depends(get_
 
             senha_hash = auth_service.hash_senha(data.senha)
 
+            role_db, nivel_sistema = data.role, None
+            if data.role in NIVEIS_SISTEMA:  # 2026-10-04
+                _exigir_master_para(current_user, "cadastrar Admin do Sistema ou Colaborador")
+                role_db, nivel_sistema = 'admin_sistema', ('colaborador' if data.role == 'colaborador' else 'master')
+
             cursor.execute("""
                 INSERT INTO mobile_operadores
-                (email, nome, telefone, senha_hash, condominio_id, role, nivel_id, ativo, criado_por)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (email, nome, telefone, senha_hash, condominio_id, role, nivel_sistema, nivel_id, ativo, criado_por)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 data.email.lower(), data.nome, data.telefone, senha_hash,
-                data.condominio_id, data.role, data.nivel_id,
+                data.condominio_id, role_db, nivel_sistema, 1 if nivel_sistema else data.nivel_id,
                 1 if data.ativo else 0, current_user.get('id')
             ))
             conn.commit()
@@ -788,6 +810,17 @@ async def atualizar_operador(operador_id: int, data: OperadorUpdate, current_use
                 raise HTTPException(status_code=404, detail="Operador não encontrado")
 
             verificar_permissao_editar(current_user, operador['condominio_id'], cursor)
+
+            if data.role is not None and data.role == _role_publico(operador):
+                data.role = None  # 2026-10-04: a tela sempre manda o nível; igual ao atual = sem mudança
+            # 2026-10-04: usuário da equipe do sistema (master/colaborador) ou nível de sistema → só o master
+            if operador['role'] == 'admin_sistema' or (data.role in NIVEIS_SISTEMA):
+                if operador['id'] != current_user.get('id') or data.role is not None:
+                    _exigir_master_para(current_user, "alterar Admin do Sistema ou Colaborador")
+                if operador['id'] == current_user.get('id') and data.role not in (None, 'admin_sistema'):
+                    raise HTTPException(status_code=400, detail="Você não pode rebaixar o seu próprio usuário")
+                if operador['id'] == current_user.get('id') and data.ativo is False:
+                    raise HTTPException(status_code=400, detail="Você não pode desativar o seu próprio usuário")
 
             if data.condominio_id and data.condominio_id != operador['condominio_id']:
                 verificar_permissao_criar(current_user, data.condominio_id, cursor)
@@ -814,7 +847,12 @@ async def atualizar_operador(operador_id: int, data: OperadorUpdate, current_use
             if data.condominio_id is not None:
                 updates.append("condominio_id = %s"); values.append(data.condominio_id)
             if data.role is not None:
-                updates.append("role = %s"); values.append(data.role)
+                if data.role in NIVEIS_SISTEMA:  # 2026-10-04
+                    updates.append("role = %s"); values.append('admin_sistema')
+                    updates.append("nivel_sistema = %s"); values.append('colaborador' if data.role == 'colaborador' else 'master')
+                else:
+                    updates.append("role = %s"); values.append(data.role)
+                    updates.append("nivel_sistema = NULL")
             if data.nivel_id is not None:
                 updates.append("nivel_id = %s"); values.append(data.nivel_id)
             if data.ativo is not None:
@@ -851,7 +889,9 @@ async def excluir_operador(operador_id: int, current_user: dict = Depends(get_cu
             if operador_id == current_user.get('id'):
                 raise HTTPException(status_code=400, detail="Você não pode excluir a si mesmo")
             if operador['role'] == 'admin_sistema':
-                raise HTTPException(status_code=400, detail="Não é possível excluir administrador do sistema")
+                if operador.get('nivel_sistema') != 'colaborador':
+                    raise HTTPException(status_code=400, detail="Não é possível excluir administrador do sistema")
+                _exigir_master_para(current_user, "excluir colaborador")  # 2026-10-04
 
             cursor.execute("DELETE FROM mobile_operadores WHERE id = %s", (operador_id,))
             conn.commit()
@@ -868,12 +908,16 @@ async def listar_roles(current_user: dict = Depends(get_current_user)):
     role = current_user.get('role', '')
     todas_roles = [
         {"value": "admin_sistema", "label": "Administrador Sistema", "nivel": 0},
+        {"value": "colaborador",   "label": "Colaborador",            "nivel": 1},  # 2026-10-04
         {"value": "sindico",       "label": "Síndico",               "nivel": 2},
         {"value": "operador",      "label": "Operador",               "nivel": 3},
         {"value": "porteiro",      "label": "Porteiro",               "nivel": 4},
     ]
     if role == 'admin_sistema':
-        return todas_roles
+        from app.services.nivel_sistema import eh_master_sistema
+        if eh_master_sistema(current_user):
+            return todas_roles
+        return [r for r in todas_roles if r['value'] not in NIVEIS_SISTEMA]  # 2026-10-04: colaborador
     if role in ['sindico', 'admin_condominio']:
         return [r for r in todas_roles if r['nivel'] >= 3]
     return []

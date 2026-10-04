@@ -92,6 +92,7 @@ class UserResponse(BaseModel):
     role: str
     nivel: int = Field(alias='nivel_id')
     ativo: bool = True
+    nivel_sistema: Optional[str] = None  # 2026-10-04: master/colaborador (só admin_sistema)
     
     class Config:
         from_attributes = True

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .database import get_db_connection
 from .auth import get_current_user
+from app.services.nivel_sistema import eh_master_sistema  # 2026-10-04: Leads só master
 
 router = APIRouter()
 
@@ -39,8 +40,8 @@ async def listar_leads(
     limit: int = Query(20, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    if current_user.get("role") != "admin_sistema":
-        raise HTTPException(status_code=403, detail="Apenas admin_sistema pode ver leads")
+    if not eh_master_sistema(current_user):
+        raise HTTPException(status_code=403, detail="Leads: acesso só do master")
 
     conn = get_db_connection()
     try:
@@ -128,8 +129,8 @@ async def atualizar_lead(
     data: AtualizarLeadRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    if current_user.get("role") != "admin_sistema":
-        raise HTTPException(status_code=403, detail="Apenas admin_sistema pode alterar leads")
+    if not eh_master_sistema(current_user):
+        raise HTTPException(status_code=403, detail="Leads: acesso só do master")
 
     if data.status is not None and data.status not in STATUS_VALIDOS:
         raise HTTPException(status_code=400, detail="status inválido")
@@ -183,8 +184,8 @@ class _AgendaLead(BaseModel):
 
 
 def _so_master(current_user):
-    if current_user.get("role") != "admin_sistema":
-        raise HTTPException(status_code=403, detail="Apenas admin_sistema")
+    if not eh_master_sistema(current_user):
+        raise HTTPException(status_code=403, detail="Leads: acesso só do master")
     return current_user.get("nome") or current_user.get("username") or "admin"
 
 

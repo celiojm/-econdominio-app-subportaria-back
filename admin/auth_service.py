@@ -89,7 +89,8 @@ class AuthService:
     # ========================================
     
     @staticmethod
-    def criar_token(user_id: int, email: str, role: str, condominio_id: int) -> str:
+    def criar_token(user_id: int, email: str, role: str, condominio_id: int,
+                    nome: Optional[str] = None, nivel_sistema: Optional[str] = None) -> str:
         """
         Cria token JWT com dados do usuário
         
@@ -111,6 +112,10 @@ class AuthService:
             "iat": now,
             "type": "access"
         }
+        if nome:
+            payload["nome"] = nome  # 2026-10-04: identificação no log
+        if nivel_sistema:
+            payload["nivel_sistema"] = nivel_sistema  # 2026-10-04: master/colaborador
         return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     
     @staticmethod

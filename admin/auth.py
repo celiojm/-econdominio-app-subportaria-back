@@ -19,6 +19,7 @@ from .auth_models import (
     PasswordReset
 )
 from .auth_service import auth_service
+from app.services.nivel_sistema import nivel_do_id  # 2026-10-04
 from .database import get_db_connection
 
 # ========================================
@@ -138,7 +139,9 @@ async def login(request: LoginRequest):
                 user_id=user_data['id'],
                 email=user_data['email'],
                 role=user_data['role'],
-                condominio_id=user_data['condominio_id']
+                condominio_id=user_data['condominio_id'],
+                nome=user_data.get('nome'),
+                nivel_sistema=nivel_do_id(user_data['id']) if user_data.get('role') == 'admin_sistema' else None
             )
             
             return TokenResponse(
@@ -154,7 +157,8 @@ async def login(request: LoginRequest):
                     condominio_nome=user_data.get('condominio_nome'),
                     role=user_data['role'],
                     nivel_id=user_data['nivel_id'],
-                    ativo=user_data['ativo']
+                    ativo=user_data['ativo'],
+                    nivel_sistema=nivel_do_id(user_data['id']) if user_data.get('role') == 'admin_sistema' else None
                 )
             )
     except HTTPException:
@@ -184,7 +188,8 @@ async def get_me(current_user: dict = Depends(get_current_active_user)):
         condominio_nome=current_user.get('condominio_nome'),
         role=current_user['role'],
         nivel_id=current_user['nivel_id'],
-        ativo=current_user['ativo']
+        ativo=current_user['ativo'],
+        nivel_sistema=nivel_do_id(current_user['id']) if current_user.get('role') == 'admin_sistema' else None
     )
 
 
@@ -210,7 +215,9 @@ async def refresh_token(current_user: dict = Depends(get_current_active_user)):
         user_id=current_user['id'],
         email=current_user['email'],
         role=current_user['role'],
-        condominio_id=current_user['condominio_id']
+        condominio_id=current_user['condominio_id'],
+        nome=current_user.get('nome'),
+        nivel_sistema=nivel_do_id(current_user['id']) if current_user.get('role') == 'admin_sistema' else None
     )
     
     return TokenResponse(

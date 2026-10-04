@@ -8,7 +8,11 @@
 #            campos enviados. Senhas nunca são gravadas (só "senha alterada").
 #            Falha ao registrar NUNCA afeta a requisição.
 #            Recebimento/entrega de encomenda ficam de fora (volume; têm registro próprio).
-# VERSÃO: 1.1.0 - eventos de unidades (2026-09-30)
+#            2026-10-04: TODA escrita 2xx da EQUIPE (admin_sistema master/colaborador e usuários do
+#            financeiro) também é registrada ("Ação da equipe": método + caminho + campos), mesmo fora de
+#            REGRAS — ex.: emitir boleto, NF, validade. Papel mostra master/colaborador.
+# VERSÃO: 1.2.0 - registro de toda ação da equipe; papel master/colaborador (2026-10-04)
+#         1.1.0 - eventos de unidades (2026-09-30)
 #         1.0.0 - criação (2026-09-30)
 # data criação: 2026-09-30 data alteração: 2026-09-30
 # ============================================================================
@@ -71,7 +75,29 @@ ROTULOS = {
     "condominio_removido": "Condomínio removido", "sindico_cadastrado": "Síndico cadastrado",
     "unidade_criada": "Unidade cadastrada", "unidade_alterada": "Unidade alterada",
     "unidade_mesclada": "Unidades mescladas", "unidade_excluida": "Unidade excluída",
+    "acao_equipe": "Ação da equipe",
 }
+# 2026-10-04: escritas da equipe que NÃO são registradas (login/sessão, robôs, chamadas automáticas)
+# 2026-10-04: nome amigável das ações da equipe (primeira que casar; senão método + caminho)
+_ACOES_EQUIPE = [(re.compile(rx, re.I), txt) for rx, txt in [
+    (r"gerar-cobranca|/cobrancas/?$|gerar-boleto", "Gerou cobrança/boleto"),
+    (r"reenviar", "Reenviou cobrança/nota"),
+    (r"gerar-nf|emitir-nf|autorizar-nf", "Emitiu/autorizou nota fiscal"),
+    (r"cancelar-nf", "Cancelou nota fiscal"),
+    (r"enviar-nf", "Enviou nota fiscal"),
+    (r"ajustar-validade|validade", "Ajustou validade"),
+    (r"/cobrancas/\d+$", "Alterou/cancelou cobrança"),
+    (r"contatos-registro|/contatos", "Registrou contato"),
+    (r"agend", "Agendou/atualizou contato"),
+    (r"leads", "Ação em lead"),
+    (r"whatsapp|mensagens", "Enviou mensagem"),
+    (r"usuarios-sistema", "Usuário do sistema"),
+    (r"usuarios", "Usuário do financeiro"),
+    (r"contas-pagar", "Contas a pagar"),
+    (r"afiliados", "Afiliados"),
+    (r"condominios", "Alterou condomínio"),
+]]
+_EQUIPE_IGNORAR = re.compile(r"/(auth|login|logout|refresh|token|webhook)(/|$)|^/api/leads/whatsapp|/check-|/validate", re.I)
 PAPEIS = {"admin_sistema": "admin do sistema", "admin_condominio": "admin", "sindico": "síndico",
           "operador": "operador", "porteiro": "porteiro"}
 
@@ -109,6 +135,7 @@ def _usuario_do_token(auth: str) -> dict:
             p = jwt.decode(tk, chave, algorithms=["HS256"])
             return {"sub": p.get("sub"), "user_id": p.get("user_id"), "nome": p.get("nome"),
                     "role": p.get("role"), "condominio_id": p.get("condominio_id"),
+                    "tipo": p.get("tipo"), "nivel_sistema": p.get("nivel_sistema"),
                     "painel": "financeiro" if chave != settings.SECRET_KEY else None}
         except JWTError:
             continue
@@ -181,6 +208,15 @@ def _gravar(metodo, caminho, regra, antes, corpo, resposta, headers):
                               {"i": int(quem)}).scalar() or f"operador #{quem}"
         uid = u.get("user_id") or (int(u["sub"]) if str(u.get("sub") or "").isdigit() else None)
         role = (u.get("role") or "").lower()
+        papel = PAPEIS.get(role) or role or None
+        if role == "admin_sistema":  # 2026-10-04: master/colaborador conferido no banco
+            try:
+                from app.services.nivel_sistema import nivel_do_id
+                papel = "colaborador do sistema" if nivel_do_id(uid) == "colaborador" else "master"
+            except Exception:
+                pass
+        elif u.get("painel") == "financeiro":
+            papel = "master (financeiro)" if (u.get("tipo") or "") in ("admin", "master") else "colaborador (financeiro)"
 
         host = (headers.get("origin") or headers.get("referer") or headers.get("host") or "").lower()
         origem = u.get("painel") or ("app" if ("portaria" in host or "mobile" in host) else
@@ -191,12 +227,15 @@ def _gravar(metodo, caminho, regra, antes, corpo, resposta, headers):
         campos = sorted(k for k in corpo if not _SENSIVEIS.search(k)) if isinstance(corpo, dict) else []
         detalhes = {
             "descricao": _descricao(ROTULOS.get(acao, acao), reg, corpo if isinstance(corpo, dict) else {}),
-            "usuario_nome": quem, "papel": PAPEIS.get(role) or role or None, "origem": origem,
+            "usuario_nome": quem, "papel": papel, "origem": origem,
             "campos": campos if metodo in ("PUT", "PATCH") else None,
             "senha_alterada": True if isinstance(corpo, dict) and any(_SENSIVEIS.search(k) and corpo.get(k) for k in corpo) else None,
             "caminho": f"{metodo} {caminho}",
             "antes": descr_antes,
         }
+        if acao == "acao_equipe":  # 2026-10-04
+            txt = next((t for rx, t in _ACOES_EQUIPE if rx.search(caminho)), None)
+            detalhes["descricao"] = f"{txt or 'Ação da equipe'} ({metodo} {caminho})"
         if acao == "moradores_importados" and isinstance(resposta, dict):
             detalhes["resultado"] = {k: v for k, v in resposta.items() if isinstance(v, (int, str)) and len(str(v)) < 80}
         detalhes = {k: v for k, v in detalhes.items() if v not in (None, [], {})}
@@ -226,7 +265,7 @@ class AuditoriaMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in ("POST", "PUT", "PATCH", "DELETE"):
             return await self.app(scope, receive, send)
-        regra = _regra(scope["method"], scope["path"])
+        regra = _regra(scope["method"], scope["path"]) or self._regra_equipe(scope)
         if not regra:
             return await self.app(scope, receive, send)
 
@@ -268,6 +307,20 @@ class AuditoriaMiddleware:
                                         antes, corpo, _json(resposta), headers)
             except Exception as e:
                 logger.warning(f"AUDITORIA erro: {e}")
+
+    @staticmethod
+    def _regra_equipe(scope):
+        """2026-10-04: escrita feita pela equipe (admin_sistema ou financeiro) → registra como ação genérica."""
+        if _EQUIPE_IGNORAR.search(scope["path"]):
+            return None
+        auth = ""
+        for k, v in scope.get("headers", []):
+            if k == b"authorization":
+                auth = v.decode("latin-1"); break
+        u = _usuario_do_token(auth)
+        if (u.get("role") or "").lower() == "admin_sistema" or u.get("painel") == "financeiro":
+            return ("acao_equipe", "sistema", None, None)
+        return None
 
     @staticmethod
     def _antes(regra):
