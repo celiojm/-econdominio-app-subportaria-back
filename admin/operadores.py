@@ -485,7 +485,7 @@ async def atualizar_condominio(
         user_email = current_user.get('email', '')
 
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id, nome, usa_subportaria, nfe_antes_pagamento, lembrete_encomenda_ativo FROM condominios WHERE id = %s", (condominio_id,))
+            cursor.execute("SELECT id, nome, usa_subportaria, nfe_antes_pagamento, lembrete_encomenda_ativo, total_apartamentos FROM condominios WHERE id = %s", (condominio_id,))
             cond = cursor.fetchone()
             if not cond:
                 raise HTTPException(status_code=404, detail="Condomínio não encontrado")
@@ -512,6 +512,12 @@ async def atualizar_condominio(
                         status_code=400,
                         detail=f"Nao e possivel desativar a subportaria: existem {pendentes} lote(s) em andamento. Feche, transfira e notifique todos os lotes antes de desativar."
                     )
+
+            # 2026-10-05: total de unidades so pode ser ALTERADO pela equipe do sistema (master/colaborador) —
+            # mesma comparacao com o valor atual (o front manda o formulario inteiro).
+            if data.total_apartamentos is not None and int(data.total_apartamentos or 0) != int(cond.get("total_apartamentos") or 0):
+                if role != "admin_sistema":
+                    raise HTTPException(status_code=403, detail="Só a equipe do sistema pode alterar o total de unidades")
 
             # nfe_antes_pagamento so pode ser ALTERADO por admin_sistema. Compara
             # com o valor atual (nao so a presenca do campo) porque o front manda

@@ -30,6 +30,7 @@ from financeiro.financeiro_condominio_routes import router as financeiro_cond_ro
 from financeiro.financeiro_nfe import router as nfe_router
 from financeiro.financeiro_preco_routes import router as preco_router
 from financeiro.financeiro_contratos_licenca import router as contratos_licenca_router  # 2026-10-05: menu Contratos
+from financeiro.financeiro_condominio_novo import router as condominio_novo_router  # 2026-10-05: Novo condomínio no financeiro
 
 # ============================================
 # NOVO: Importar rotas de autenticação mobile
@@ -172,6 +173,7 @@ app.include_router(financeiro_cond_router, prefix="/painel/financeiro", tags=["f
 app.include_router(nfe_router)
 app.include_router(preco_router, prefix="/api/financeiro", tags=["precos"])
 app.include_router(contratos_licenca_router, prefix="/api/financeiro", tags=["contratos-licenca"])  # 2026-10-05
+app.include_router(condominio_novo_router, prefix="/api/financeiro", tags=["condominio-novo"])  # 2026-10-05
 
 # Rotas públicas de cadastro de clientes
 app.include_router(cliente_router, prefix="/api")

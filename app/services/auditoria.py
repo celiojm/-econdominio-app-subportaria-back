@@ -82,6 +82,8 @@ ROTULOS = {
 # 2026-10-04: nome amigável das ações da equipe (primeira que casar; senão método + caminho)
 _ACOES_EQUIPE = [(re.compile(rx, re.I), txt) for rx, txt in [
     (r"contratos-licenca", "Gerou contrato de licença"),  # 2026-10-05
+    (r"/condominios/novo$", "Cadastrou condomínio (com síndico e senha)"),  # 2026-10-05
+    (r"/nova-senha$", "Gerou senha nova para usuário do condomínio"),  # 2026-10-05
     (r"gerar-cobranca|/cobrancas/?$|gerar-boleto", "Gerou cobrança/boleto"),
     (r"reenviar", "Reenviou cobrança/nota"),
     (r"gerar-nf|emitir-nf|autorizar-nf", "Emitiu/autorizou nota fiscal"),
