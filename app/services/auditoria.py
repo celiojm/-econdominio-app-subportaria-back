@@ -11,7 +11,8 @@
 #            2026-10-04: TODA escrita 2xx da EQUIPE (admin_sistema master/colaborador e usuários do
 #            financeiro) também é registrada ("Ação da equipe": método + caminho + campos), mesmo fora de
 #            REGRAS — ex.: emitir boleto, NF, validade. Papel mostra master/colaborador.
-# VERSÃO: 1.2.0 - registro de toda ação da equipe; papel master/colaborador (2026-10-04)
+# VERSÃO: 1.2.1 - usuário do financeiro: id nos detalhes (o FK de usuario_id recusava e o evento se perdia) (2026-10-05)
+#         1.2.0 - registro de toda ação da equipe; papel master/colaborador (2026-10-04)
 #         1.1.0 - eventos de unidades (2026-09-30)
 #         1.0.0 - criação (2026-09-30)
 # data criação: 2026-09-30 data alteração: 2026-09-30
@@ -80,6 +81,7 @@ ROTULOS = {
 # 2026-10-04: escritas da equipe que NÃO são registradas (login/sessão, robôs, chamadas automáticas)
 # 2026-10-04: nome amigável das ações da equipe (primeira que casar; senão método + caminho)
 _ACOES_EQUIPE = [(re.compile(rx, re.I), txt) for rx, txt in [
+    (r"contratos-licenca", "Gerou contrato de licença"),  # 2026-10-05
     (r"gerar-cobranca|/cobrancas/?$|gerar-boleto", "Gerou cobrança/boleto"),
     (r"reenviar", "Reenviou cobrança/nota"),
     (r"gerar-nf|emitir-nf|autorizar-nf", "Emitiu/autorizou nota fiscal"),
@@ -207,6 +209,9 @@ def _gravar(metodo, caminho, regra, antes, corpo, resposta, headers):
             quem = db.execute(text("SELECT nome FROM mobile_operadores WHERE id = :i"),
                               {"i": int(quem)}).scalar() or f"operador #{quem}"
         uid = u.get("user_id") or (int(u["sub"]) if str(u.get("sub") or "").isdigit() else None)
+        fin_uid = None
+        if u.get("painel") == "financeiro":  # 2026-10-05: id do financeiro NÃO é mobile_operadores.id (FK) — vai nos detalhes
+            fin_uid, uid = uid, None
         role = (u.get("role") or "").lower()
         papel = PAPEIS.get(role) or role or None
         if role == "admin_sistema":  # 2026-10-04: master/colaborador conferido no banco
@@ -232,6 +237,7 @@ def _gravar(metodo, caminho, regra, antes, corpo, resposta, headers):
             "senha_alterada": True if isinstance(corpo, dict) and any(_SENSIVEIS.search(k) and corpo.get(k) for k in corpo) else None,
             "caminho": f"{metodo} {caminho}",
             "antes": descr_antes,
+            "financeiro_usuario_id": fin_uid,
         }
         if acao == "acao_equipe":  # 2026-10-04
             txt = next((t for rx, t in _ACOES_EQUIPE if rx.search(caminho)), None)
