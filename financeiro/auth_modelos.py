@@ -130,7 +130,7 @@ class LoginAttempt(Base):
 class LoginRequest(BaseModel):
     """Schema para requisição de login"""
     email: EmailStr
-    password: str = Field(..., min_length=6)
+    password: str = Field(..., min_length=1)  # 2026-10-06: login aceita senhas antigas curtas (8 só ao criar/trocar)
     
     class Config:
         json_schema_extra = {
