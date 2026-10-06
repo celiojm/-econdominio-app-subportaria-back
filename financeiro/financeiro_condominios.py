@@ -443,6 +443,8 @@ async def criar_operador_condominio(
         senha    = payload.get("password", "").strip()
         role     = payload.get("role", "operador")
 
+        if senha and len(senha) < 8:  # 2026-10-06
+            raise HTTPException(status_code=400, detail="A senha precisa ter no mínimo 8 caracteres")
         if not nome or not email or not senha:
             raise HTTPException(status_code=422, detail="nome, email e senha são obrigatórios")
 
@@ -475,6 +477,8 @@ async def atualizar_operador(
         params  = {"id": operador_id, "cid": id_condominio}
 
         if "password" in payload and payload["password"]:
+            if len(str(payload["password"]).strip()) < 8:  # 2026-10-06
+                raise HTTPException(status_code=400, detail="A senha precisa ter no mínimo 8 caracteres")
             senha_hash = bcrypt.hashpw(payload["password"].encode(), bcrypt.gensalt()).decode()
             updates.append("senha_hash = :senha_hash")
             params["senha_hash"] = senha_hash

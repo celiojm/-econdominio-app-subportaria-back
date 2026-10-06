@@ -70,6 +70,12 @@ class OperadorCreate(BaseModel):
             return re.sub(r'\D', '', v)
         return v
 
+    @validator('senha')
+    def validar_senha(cls, v):  # 2026-10-06: o app da portaria recusa login com senha curta
+        if not v or len(v.strip()) < 8:
+            raise ValueError('A senha precisa ter no mínimo 8 caracteres')
+        return v
+
     @validator('role')
     def validar_role(cls, v):
         if v not in ROLES_VALIDOS:
@@ -91,6 +97,12 @@ class OperadorUpdate(BaseModel):
     def normalizar_telefone(cls, v):
         if v:
             return re.sub(r'\D', '', v)
+        return v
+
+    @validator('senha')
+    def validar_senha(cls, v):  # 2026-10-06: só confere quando a senha é trocada
+        if v and len(v.strip()) < 8:
+            raise ValueError('A senha precisa ter no mínimo 8 caracteres')
         return v
 
     @validator('role')

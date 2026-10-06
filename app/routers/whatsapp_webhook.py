@@ -365,11 +365,41 @@ def find_morador_by_phone(db, wa_id: str) -> Optional[Dict]:
         SELECT id, nome, telefone, condominio_id, apartamento, whats_confirmado
         FROM moradores
         WHERE {phone_expr} IN ({placeholders})
+        ORDER BY ativo DESC, id DESC
         LIMIT 1
     """)
     params = {f"p{i}": candidates[i] for i in range(len(candidates))}
     result = db.execute(sql, params).mappings().first()
     return dict(result) if result else None
+
+
+def find_morador_cadastro_recente(db, wa_id: str) -> Optional[Dict]:
+    """2026-10-06: morador da ÚLTIMA mensagem CADASTRO_MORADOR enviada a este número (30 dias).
+    É a resposta dela que chega como "Sim, sou eu"/"Não sou eu" — o botão não traz o id do morador."""
+    candidates = generate_phone_candidates(wa_id)
+    if not candidates:
+        return None
+    tel = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(q.telefone,''), ' ', ''), '-', ''), '(', ''), ')', ''), '+', '')"
+    placeholders = ", ".join([f":p{i}" for i in range(len(candidates))])
+    try:
+        r = db.execute(text(f"""
+            SELECT q.morador_id, q.encomenda_id
+              FROM whatsapp_message_queue q
+             WHERE q.tipo_evento = 'CADASTRO_MORADOR' AND q.status = 'sent' AND q.morador_id IS NOT NULL
+               AND q.enviado_em >= NOW() - INTERVAL 30 DAY
+               AND {tel} IN ({placeholders})
+             ORDER BY q.enviado_em DESC, q.id DESC
+             LIMIT 1
+        """), {f"p{i}": candidates[i] for i in range(len(candidates))}).mappings().first()
+    except Exception as exc:
+        logger.warning("find_morador_cadastro_recente falhou | %s", exc)
+        return None
+    if not r:
+        return None
+    m = find_morador_by_phone_id(db, r["morador_id"])
+    if m:
+        m["_encomenda_id_cadastro"] = r["encomenda_id"]
+    return m
 
 
 def find_morador_by_phone_id(db, morador_id: int) -> Optional[Dict]:
@@ -2099,6 +2129,14 @@ async def receive_webhook(request: Request):
                         matched_phone = None
                     else:
                         morador       = find_morador_by_phone(db, wa_id)
+                        # 2026-10-06: resposta à mensagem de cadastro → o morador PARA QUEM ela foi enviada
+                        if _is_confirmar_morador(button_id, message_text_norm) or _is_negar_morador(button_id, message_text_norm):
+                            morador_cadastro = find_morador_cadastro_recente(db, wa_id)
+                            if morador_cadastro:
+                                if morador and morador.get("id") != morador_cadastro.get("id"):
+                                    logger.info("Confirmação de cadastro: morador pela mensagem enviada #%s (busca por telefone daria #%s)",
+                                                morador_cadastro.get("id"), morador.get("id"))
+                                morador = morador_cadastro
                         action_taken  = "only_logged"
                         condominio_id = None
                         morador_id    = None
@@ -2124,7 +2162,10 @@ async def receive_webhook(request: Request):
 
                             if _is_confirmar_morador(button_id, message_text_norm):
                                 enc_id_ref = None
-                                if encomendas_pendentes:
+                                enc_cad = morador.get("_encomenda_id_cadastro")
+                                if enc_cad and any(e.get("id") == enc_cad for e in (encomendas_pendentes or [])):
+                                    enc_id_ref = enc_cad  # 2026-10-06: a encomenda da mensagem de cadastro
+                                elif encomendas_pendentes:
                                     enc_id_ref = encomendas_pendentes[0].get("id")
                                 action_taken = await handle_confirmar_morador(
                                     db, wa_id, morador, button_id, enc_id_ref
