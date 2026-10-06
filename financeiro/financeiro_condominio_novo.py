@@ -8,7 +8,8 @@
 #            podem repetir (409). A senha volta UMA vez na resposta para o operador conferir/repassar.
 #            Rotas: POST /api/financeiro/condominios/novo
 #                   POST /api/financeiro/condominios/{id}/sindico/{operador_id}/nova-senha (gera, grava e envia)
-# VERSÃO: 1.0.0 - criação
+# VERSÃO: 1.0.1 - sem CNPJ grava em branco (coluna condominios.cnpj é NOT NULL; dava erro) (2026-10-06)
+#         1.0.0 - criação
 # data criação: 2026-10-05 data alteração: 2026-10-05
 # ============================================================================
 import logging
@@ -125,7 +126,7 @@ async def cadastrar_condominio(dados: NovoCondominio, db: Session = Depends(get_
                 cobranca_responsavel, cobranca_email, cobranca_whats, ativo, situacao_assinatura, situacao_atualizada_em)
             VALUES (:nome, :cnpj, :end, :num, :comp, :bairro, :cidade, :uf, :cep, :tel, :email, :email_fin, :sindico,
                 :aptos, :validade, 'trial', :sindico, :email_fin, :whats, 1, 'em_teste', NOW())"""),
-            {"nome": nome_cond, "cnpj": cnpj_fmt, "end": dados.endereco, "num": dados.numero, "comp": dados.complemento,
+            {"nome": nome_cond, "cnpj": cnpj_fmt or "", "end": dados.endereco, "num": dados.numero, "comp": dados.complemento,
              "bairro": dados.bairro, "cidade": dados.cidade, "uf": (dados.estado or "").upper() or None,
              "cep": _digitos(dados.cep) or None, "tel": _digitos(dados.telefone) or whats or None,
              "email": (dados.email or email).strip(), "email_fin": email, "sindico": dados.sindico_nome.strip(),

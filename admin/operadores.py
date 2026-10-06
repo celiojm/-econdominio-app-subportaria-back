@@ -497,7 +497,7 @@ async def atualizar_condominio(
         user_email = current_user.get('email', '')
 
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id, nome, usa_subportaria, nfe_antes_pagamento, lembrete_encomenda_ativo, total_apartamentos FROM condominios WHERE id = %s", (condominio_id,))
+            cursor.execute("SELECT id, nome, cnpj, endereco, numero, complemento, bairro, cidade, estado, cep, usa_subportaria, nfe_antes_pagamento, lembrete_encomenda_ativo, total_apartamentos FROM condominios WHERE id = %s", (condominio_id,))
             cond = cursor.fetchone()
             if not cond:
                 raise HTTPException(status_code=404, detail="Condomínio não encontrado")
@@ -524,6 +524,16 @@ async def atualizar_condominio(
                         status_code=400,
                         detail=f"Nao e possivel desativar a subportaria: existem {pendentes} lote(s) em andamento. Feche, transfira e notifique todos os lotes antes de desativar."
                     )
+
+            # 2026-10-06: dados cadastrais (CNPJ, nome, endereco) so a equipe do sistema altera — o sindico ve como
+            # somente leitura na tela; aqui garante tambem pela API. Compara com o valor atual (o front manda tudo).
+            if role != "admin_sistema":
+                import re as _re
+                _norm = lambda k, v: _re.sub(r"\D", "", str(v or "")) if k in ("cnpj", "cep") else str(v or "").strip().upper()
+                for _k in ("nome", "cnpj", "endereco", "numero", "complemento", "bairro", "cidade", "estado", "cep"):
+                    _novo = getattr(data, _k, None)
+                    if _novo is not None and _norm(_k, _novo) != _norm(_k, cond.get(_k)):
+                        raise HTTPException(status_code=403, detail="Dados cadastrais (CNPJ, nome e endereço) só a equipe do sistema altera")
 
             # 2026-10-05: total de unidades so pode ser ALTERADO pela equipe do sistema (master/colaborador) —
             # mesma comparacao com o valor atual (o front manda o formulario inteiro).

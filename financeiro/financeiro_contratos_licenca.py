@@ -9,7 +9,8 @@
 #            contratos_condominio (quem gerou vem do login). Download sempre pelo backend (com login).
 #            Rotas (prefixo /api/financeiro): GET /contratos-licenca, GET /contratos-licenca/condominio/{id},
 #            GET /contratos-licenca/cnpj/{cnpj}, POST /contratos-licenca, GET /contratos-licenca/{id}/pdf
-# VERSÃO: 1.0.0 - criação
+# VERSÃO: 1.0.1 - consulta por CNPJ devolve também logradouro/número/complemento/bairro/CEP separados (2026-10-06)
+#         1.0.0 - criação
 # data criação: 2026-10-05 data alteração: 2026-10-05
 # ============================================================================
 import base64
@@ -108,6 +109,9 @@ def _dados_condominio(db: Session, cid: int) -> dict:
         "quantidade_unidades": c.get("total_apartamentos") or None,
         "plano": (c.get("plano_selecionado") or "mensal").lower() if (c.get("plano_selecionado") or "").lower() in PLANOS_MESES else "mensal",
         "forma_pagamento": FORMA_PADRAO,
+        # 2026-10-05: partes do endereço (formulários que têm campos separados)
+        "logradouro": c.get("endereco") or "", "numero": c.get("numero") or "", "complemento": c.get("complemento") or "",
+        "bairro": c.get("bairro") or "", "cep": _digitos(c.get("cep")),
     }
 
 
@@ -173,6 +177,9 @@ def buscar_cnpj(cnpj: str, db: Session = Depends(get_db), quem: dict = Depends(u
         "representante": "", "cpf_representante": "", "email": r.get("email") or "", "telefone": r.get("telefone") or "",
         "quantidade_unidades": None, "plano": "mensal", "forma_pagamento": FORMA_PADRAO, "situacao_receita": r.get("situacao"),
         "planos": _tabela_planos(db, None, None),
+        # 2026-10-05: partes do endereço vindas da Receita
+        "logradouro": r.get("logradouro") or "", "numero": r.get("numero") or "", "complemento": r.get("complemento") or "",
+        "bairro": r.get("bairro") or "", "cep": _digitos(r.get("cep")),
     }
 
 
