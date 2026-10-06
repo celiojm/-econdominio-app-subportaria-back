@@ -1,6 +1,7 @@
 # ~/encomenda_v2/backend/app/api/whatsapp.py
 # API de envio de WhatsApp - Z-API
-# Versão: 4.0.0 - Migrado para Z-API
+# Versão: 4.1.0 - todas as rotas exigem login da equipe do sistema (2026-10-06)
+# Versão anterior: 4.0.0 - Migrado para Z-API
 # Data: 2025-12-08
 # Documentação: https://developer.z-api.io/
 
@@ -13,7 +14,23 @@ import os
 
 from app.database import get_db
 
-router = APIRouter()
+# 2026-10-06: TODAS as rotas /api/whatsapp/* exigem login da equipe do sistema (admin_sistema: master ou colaborador).
+# Antes dependiam só do bloqueio no NGINX (snippets/bloqueio-rotas-inseguras.conf), que continua como 2ª camada.
+from fastapi import Request
+from app.services.protecao_financeiro import ler_token_interno
+
+
+async def _so_equipe_sistema(request: Request):
+    auth = request.headers.get("authorization", "")
+    quem = ler_token_interno(auth[7:].strip()) if auth.lower().startswith("bearer ") else None
+    if not quem:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    if quem.get("origem") != "admin":
+        raise HTTPException(status_code=403, detail="Apenas a equipe do sistema")
+    return quem
+
+
+router = APIRouter(dependencies=[Depends(_so_equipe_sistema)])
 logger = logging.getLogger(__name__)
 
 # ============================================================================
