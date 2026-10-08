@@ -356,6 +356,7 @@ async def list_moradores(
     order_by: Optional[str] = "nome",
     skip: int = 0,
     limit: int = 100,
+    condominio_id: Optional[int] = None,  # 2026-10-08: master/colaborador listam os moradores de UM condomínio
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -381,6 +382,11 @@ async def list_moradores(
 
             count_query = f"SELECT COUNT(*) as total FROM moradores WHERE {status_clause}"
             count_params = {}
+            if condominio_id:  # 2026-10-08: só os moradores do condomínio escolhido
+                query += " AND condominio_id = :cid"
+                count_query += " AND condominio_id = :cid"
+                params["cid"] = condominio_id
+                count_params["cid"] = condominio_id
         else:
             query = f"""
                 SELECT id, nome, apartamento, bloco, telefone, whats_confirmado, email, condominio_id, ativo,
