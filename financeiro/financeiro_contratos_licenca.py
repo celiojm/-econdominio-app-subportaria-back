@@ -9,9 +9,13 @@
 #            contratos_condominio (quem gerou vem do login). Download sempre pelo backend (com login).
 #            Rotas (prefixo /api/financeiro): GET /contratos-licenca, GET /contratos-licenca/condominio/{id},
 #            GET /contratos-licenca/cnpj/{cnpj}, POST /contratos-licenca, GET /contratos-licenca/{id}/pdf
-# VERSÃO: 1.0.1 - consulta por CNPJ devolve também logradouro/número/complemento/bairro/CEP separados (2026-10-06)
+# VERSÃO: 1.1.0 - contratada e contratante separadas no início (contato contato@econdominio.com.br / WhatsApp
+#                 (48) 92001-4309); planos pela qtd de unidades (usa a do cadastro se faltar); bloqueia o CNPJ da
+#                 contratada como contratante; cancelamento sem multa e sem aviso prévio, valendo até o fim do
+#                 período já pago (2026-10-08)
+#         1.0.1 - consulta por CNPJ devolve também logradouro/número/complemento/bairro/CEP separados (2026-10-06)
 #         1.0.0 - criação
-# data criação: 2026-10-05 data alteração: 2026-10-05
+# data criação: 2026-10-05 data alteração: 2026-10-08
 # ============================================================================
 import base64
 import io
@@ -41,6 +45,15 @@ STORAGE_API_KEY = os.getenv("IMAGE_STORAGE_API_KEY") or os.getenv("STORAGE_API_K
 PLANOS_MESES = {"mensal": 1, "trimestral": 3, "semestral": 6, "anual": 12}
 PLANOS_NOME = {"mensal": "Mensal", "trimestral": "Trimestral", "semestral": "Semestral", "anual": "Anual"}
 FORMA_PADRAO = "Boleto bancário ou PIX (fatura emitida pela plataforma Asaas)"
+# Dados fixos da CONTRATADA (2026-10-08: contato oficial contato@ / WhatsApp do atendimento)
+CONTRATADA = {
+    "nome": "E-CONDOMINIO SISTEMAS DE GESTAO LTDA",
+    "cnpj": "64.931.933/0001-85",
+    "endereco": "Rua Professora Sofia Quint de Souza, nº 544, Capoeiras, Florianópolis/SC, CEP 88.085-040",
+    "email": "contato@econdominio.com.br",
+    "whatsapp": "(48) 92001-4309",
+}
+CNPJ_CONTRATADA = "64931933000185"
 MESES_PT = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto",
             "setembro", "outubro", "novembro", "dezembro"]
 
@@ -119,7 +132,8 @@ def _dados_condominio(db: Session, cid: int) -> dict:
 def listar_contratos(condominio_id: Optional[int] = Query(None), db: Session = Depends(get_db),
                      quem: dict = Depends(usuario_interno)):
     sql = """SELECT k.id, k.condominio_id, k.cnpj, k.razao_social, k.plano, k.valor, k.inicio_vigencia,
-                    k.primeiro_vencimento, k.periodo_teste_dias, k.arquivo, k.status, k.criado_por_nome, k.criado_em
+                    k.primeiro_vencimento, k.periodo_teste_dias, k.arquivo, k.status, k.criado_por_nome, k.criado_em,
+                    k.dados
                FROM contratos_condominio k"""
     prm = {}
     if condominio_id:
@@ -131,8 +145,30 @@ def listar_contratos(condominio_id: Optional[int] = Query(None), db: Session = D
         for k in ("inicio_vigencia", "primeiro_vencimento", "criado_em"):
             d[k] = d[k].isoformat() if d.get(k) else None
         d["valor"] = float(d["valor"] or 0)
+        # 2026-10-08: síndico/representante e e-mail (para a busca da tela), lidos do resumo gravado
+        try:
+            dados = json.loads(d.pop("dados") or "{}")
+        except (TypeError, ValueError):
+            dados = {}
+        d["representante"] = dados.get("representante") or ""
+        d["email"] = dados.get("email") or ""
+        d["telefone"] = dados.get("telefone") or ""
         itens.append(d)
     return {"items": itens}
+
+
+@router.delete("/contratos-licenca/{contrato_id}")
+def excluir_contrato(contrato_id: int, db: Session = Depends(get_db), quem: dict = Depends(usuario_interno)):
+    """2026-10-08: exclui o registro de um contrato gerado com erro (só master). O PDF fica no storage, sem acesso."""
+    if not quem.get("master"):
+        raise HTTPException(status_code=403, detail="Só o master pode excluir contrato")
+    r = db.execute(text("SELECT id, razao_social, arquivo FROM contratos_condominio WHERE id = :i"), {"i": contrato_id}).fetchone()
+    if not r:
+        raise HTTPException(status_code=404, detail="Contrato não encontrado")
+    db.execute(text("DELETE FROM contratos_condominio WHERE id = :i"), {"i": contrato_id})
+    db.commit()
+    logger.info("CONTRATO: #%s (%s, %s) excluído por %s", r.id, r.razao_social, r.arquivo, quem.get("nome"))
+    return {"success": True, "id": contrato_id}
 
 
 @router.get("/contratos-licenca/condominio/{condominio_id}")
@@ -210,8 +246,12 @@ def gerar_contrato(dados: NovoContrato, db: Session = Depends(get_db), quem: dic
     plano = (dados.plano or "").lower()
     if plano not in PLANOS_MESES:
         raise HTTPException(status_code=400, detail="Plano inválido (mensal, trimestral, semestral ou anual)")
+    if _digitos(dados.cnpj) == CNPJ_CONTRATADA:
+        raise HTTPException(status_code=400, detail="Esse é o CNPJ da eCondomínio (CONTRATADA). Informe o CNPJ do condomínio contratante.")
     if dados.condominio_id:
-        _dados_condominio(db, dados.condominio_id)  # confere se existe
+        cad = _dados_condominio(db, dados.condominio_id)  # confere se existe
+        if not dados.quantidade_unidades and cad.get("quantidade_unidades"):
+            dados.quantidade_unidades = int(cad["quantidade_unidades"])  # planos pela qtd de unidades do cadastro
     if dados.primeiro_vencimento < dados.inicio_vigencia:
         raise HTTPException(status_code=400, detail="O primeiro vencimento não pode ser antes do início da vigência")
     planos = _tabela_planos(db, dados.quantidade_unidades, dados.condominio_id)
@@ -273,8 +313,9 @@ ESCOPO = [
 
 PREAMBULO = ("Pelo presente instrumento particular, de um lado, <b>E-CONDOMINIO SISTEMAS DE GESTAO LTDA</b>, inscrita no CNPJ "
              "nº 64.931.933/0001-85, com sede na Rua Professora Sofia Quint de Souza, nº 544, Capoeiras, Florianópolis/SC, "
-             "CEP 88.085-040, e-mail econdominio@econdominio.com.br, doravante denominada <b>CONTRATADA</b>; e, de outro lado, "
-             "a pessoa jurídica identificada no Quadro Resumo, neste ato representada por seu representante legal ou síndico, "
+             "CEP 88.085-040, e-mail contato@econdominio.com.br, WhatsApp (48) 92001-4309, doravante denominada "
+             "<b>CONTRATADA</b>; e, de outro lado, o condomínio identificado no Quadro Resumo como CONTRATANTE, neste ato "
+             "representado por seu representante legal ou síndico, "
              "doravante denominada <b>CONTRATANTE</b>, resolvem celebrar o presente Contrato de Licença de Uso, Acesso e Suporte "
              "do Software eCondomínio, mediante as cláusulas e condições a seguir.")
 
@@ -346,16 +387,14 @@ CLAUSULAS = [
         "11.2. Persistindo o inadimplemento após notificação formal e não sendo a situação regularizada em até 15 (quinze) dias corridos do recebimento da notificação, a CONTRATADA poderá suspender o acesso ao sistema e/ou rescindir o Contrato, permanecendo exigíveis apenas os valores vencidos e os serviços regularmente disponibilizados até a data efetiva do encerramento.",
         "11.3. A suspensão por inadimplemento não impede a CONTRATANTE de solicitar o cancelamento nos termos da Cláusula 12, sem prejuízo da quitação de valores vencidos.",
     ]),
-    ("CLÁUSULA 12 — CANCELAMENTO, RESCISÃO E DEVOLUÇÃO DE VALORES", [
-        "12.1. A CONTRATANTE poderá solicitar o cancelamento do serviço a qualquer momento, sem multa, penalidade de fidelidade ou cobrança do saldo integral do ciclo contratado, desde que comunique formalmente a CONTRATADA com antecedência mínima de 30 (trinta) dias.",
-        "12.2. Durante o prazo de aviso prévio de 30 (trinta) dias, o serviço permanecerá disponível e os valores correspondentes a esse período continuarão devidos. A data efetiva de encerramento será o término do aviso prévio, salvo acordo escrito entre as partes.",
-        "12.3. Nos planos trimestral, semestral ou anual pagos antecipadamente, a CONTRATADA restituirá à CONTRATANTE os valores correspondentes ao período não utilizado posterior à data efetiva do encerramento, calculados proporcionalmente sobre o valor efetivamente pago no plano contratado (pro rata temporis; o valor será exatamente o valor já pago, não se aplicando reajuste, multa, juros etc.).",
-        "12.4. A restituição prevista no item 12.3 será realizada em até 15 (quinze) dias úteis após a data efetiva do encerramento e a apuração dos valores, preferencialmente pelo mesmo meio de pagamento quando tecnicamente possível, ou por transferência para conta indicada pela CONTRATANTE.",
-        "12.5. No plano mensal, não haverá restituição de valores referentes ao período de serviço já prestado ou abrangido pelo aviso prévio, permanecendo devidos os valores até a data efetiva do encerramento.",
-        "12.6. O pedido de cancelamento deverá ser realizado por escrito, por meio que permita comprovar seu envio e conteúdo, inclusive e-mail corporativo, plataforma de assinatura eletrônica ou outro canal formal acordado entre as partes. A simples interrupção do uso do software, desinstalação do aplicativo ou interrupção unilateral dos pagamentos não constitui pedido válido de cancelamento.",
-        "12.7. O Contrato poderá ser rescindido por qualquer das partes em caso de descumprimento relevante da outra parte, desde que o inadimplemento seja comunicado por escrito e não seja sanado no prazo de 15 (quinze) dias corridos contados do recebimento da notificação, quando a correção for possível.",
-        "12.8. Se a rescisão decorrer de descumprimento relevante imputável à CONTRATADA, a CONTRATANTE poderá encerrar o Contrato sem necessidade de cumprir o aviso prévio de 30 (trinta) dias, sendo restituídos os valores pagos antecipadamente referentes ao período posterior à data efetiva da rescisão.",
-        "12.9. A rescisão motivada por uso ilícito do sistema, violação grave das regras de segurança ou outro descumprimento relevante imputável à CONTRATANTE poderá resultar na suspensão imediata do acesso quando necessária à proteção da plataforma, dos dados ou de terceiros, sem prejuízo da posterior formalização da rescisão.",
+    ("CLÁUSULA 12 — CANCELAMENTO E RESCISÃO", [
+        "12.1. NÃO HÁ MULTA POR RESCISÃO. A CONTRATANTE poderá cancelar o serviço a qualquer momento, sem multa, sem fidelidade, sem aviso prévio e sem cobrança do saldo do ciclo contratado.",
+        "12.2. Cancelado o serviço, o acesso permanecerá disponível até o término do período coberto pelo último pagamento realizado (dias restantes do ciclo já pago), que será a data efetiva do encerramento. Nenhuma nova cobrança será emitida após o pedido de cancelamento.",
+        "12.3. Por permanecerem disponíveis para uso até a data efetiva do encerramento, os dias restantes do período já pago não serão restituídos, inclusive nos planos trimestral, semestral e anual.",
+        "12.4. O pedido de cancelamento deverá ser feito por escrito, por meio que permita comprovar seu envio e conteúdo, inclusive e-mail (contato@econdominio.com.br), WhatsApp oficial ((48) 92001-4309) ou outro canal formal acordado entre as partes. A simples interrupção do uso do software ou a desinstalação do aplicativo não constitui pedido de cancelamento.",
+        "12.5. O Contrato poderá ser rescindido por qualquer das partes em caso de descumprimento relevante da outra parte, desde que o inadimplemento seja comunicado por escrito e não seja sanado no prazo de 15 (quinze) dias corridos contados do recebimento da notificação, quando a correção for possível.",
+        "12.6. Se a rescisão decorrer de descumprimento relevante imputável à CONTRATADA, serão restituídos à CONTRATANTE os valores pagos antecipadamente referentes ao período posterior à data efetiva da rescisão.",
+        "12.7. A rescisão motivada por uso ilícito do sistema, violação grave das regras de segurança ou outro descumprimento relevante imputável à CONTRATANTE poderá resultar na suspensão imediata do acesso quando necessária à proteção da plataforma, dos dados ou de terceiros, sem prejuízo da posterior formalização da rescisão.",
     ]),
     ("CLÁUSULA 13 — ENCERRAMENTO DO ACESSO E PORTABILIDADE DOS DADOS", [
         "13.1. Na data efetiva do encerramento, o acesso ordinário da CONTRATANTE ao sistema poderá ser desativado, ressalvado eventual período técnico concedido exclusivamente para exportação de dados.",
@@ -461,6 +500,14 @@ def montar_pdf(d: NovoContrato, plano: str, planos: list) -> bytes:
         P("SOFTWARE eCONDOMÍNIO", s_sub),
         P("MODELO PADRÃO — DADOS ESPECÍFICOS DA CONTRATAÇÃO NO QUADRO RESUMO", s_mini),
         P("QUADRO RESUMO DA CONTRATAÇÃO", s_h),
+        P("CONTRATADA (fornecedora do software)", s_h),
+        tabela([
+            ["CONTRATADA", CONTRATADA["nome"]],
+            ["CNPJ", CONTRATADA["cnpj"]],
+            ["ENDEREÇO", CONTRATADA["endereco"]],
+            ["E-MAIL / WHATSAPP", f"{CONTRATADA['email']} / WhatsApp {CONTRATADA['whatsapp']}"],
+        ], [5.6 * cm, w - 5.6 * cm]),
+        P("CONTRATANTE (condomínio)", s_h),
         tabela([
             ["CONTRATANTE / CONDOMÍNIO", d.razao_social.strip()],
             ["CNPJ", _fmt_cnpj(d.cnpj) or "—"],
@@ -468,6 +515,9 @@ def montar_pdf(d: NovoContrato, plano: str, planos: list) -> bytes:
             ["REPRESENTANTE LEGAL / SÍNDICO", representante or "—"],
             ["E-MAIL / TELEFONE", contato or "—"],
             ["QUANTIDADE DE UNIDADES", str(d.quantidade_unidades or "—")],
+        ], [5.6 * cm, w - 5.6 * cm]),
+        P("CONDIÇÕES DA CONTRATAÇÃO", s_h),
+        tabela([
             ["PLANO CONTRATADO", plano_nome.upper()],
             ["VALOR CONTRATADO", _moeda(d.valor) + (" por mês" if meses == 1 else f" (parcela única, ciclo de {meses} meses)")],
             ["FORMA DE PAGAMENTO", forma],
@@ -475,7 +525,7 @@ def montar_pdf(d: NovoContrato, plano: str, planos: list) -> bytes:
             ["PRIMEIRO VENCIMENTO", _data_br(d.primeiro_vencimento)],
             ["PERÍODO DE TESTE, SE HOUVER", teste],
         ], [5.6 * cm, w - 5.6 * cm]),
-        P("PLANOS COMERCIAIS DISPONÍVEIS", s_h),
+        P("PLANOS COMERCIAIS DISPONÍVEIS" + (f" — para {d.quantidade_unidades} unidades" if d.quantidade_unidades else ""), s_h),
         tabela(linhas_planos, [4.6 * cm, 4.0 * cm, 3.8 * cm, w - 12.4 * cm], cabecalho=True),
         Spacer(1, 4),
         P("<b>Observação comercial:</b> os planos trimestral, semestral e anual são pagos antecipadamente em parcela única. "
@@ -493,7 +543,7 @@ def montar_pdf(d: NovoContrato, plano: str, planos: list) -> bytes:
     linha = "_" * 42
     ass = Table([
         [P(linha, s_cel), P(linha, s_cel)],
-        [P("<b>E-CONDOMINIO SISTEMAS DE GESTAO LTDA</b><br/>CNPJ 64.931.933/0001-85<br/>CONTRATADA", s_cel),
+        [P(f"<b>{CONTRATADA['nome']}</b><br/>CNPJ {CONTRATADA['cnpj']}<br/>CONTRATADA", s_cel),
          P(f"<b>{esc(d.razao_social.strip())}</b><br/>CNPJ {esc(_fmt_cnpj(d.cnpj) or '________')}<br/>"
            f"{esc((d.representante or '').strip() or 'Representante legal / Síndico')}<br/>CONTRATANTE", s_cel)],
     ], colWidths=[w / 2, w / 2])
@@ -518,8 +568,8 @@ def montar_pdf(d: NovoContrato, plano: str, planos: list) -> bytes:
                   ["Primeiro vencimento", _data_br(d.primeiro_vencimento)],
                   ["Período de teste, se houver", teste],
                   ["Implantação", "Sem taxa adicional, salvo proposta específica"],
-                  ["Cancelamento", "Aviso prévio mínimo de 30 dias, sem multa"],
-                  ["Planos antecipados", "Restituição proporcional do período não utilizado após a data efetiva do cancelamento"],
+                  ["Cancelamento", "A qualquer momento, sem multa e sem aviso prévio"],
+                  ["Após o cancelamento", "Acesso mantido até o fim do período coberto pelo último pagamento; nenhuma nova cobrança"],
               ], [5.6 * cm, w - 5.6 * cm]),
               P("2. TABELA DE PLANOS", s_h),
               tabela(linhas_planos, [4.6 * cm, 4.0 * cm, 3.8 * cm, w - 12.4 * cm], cabecalho=True),
