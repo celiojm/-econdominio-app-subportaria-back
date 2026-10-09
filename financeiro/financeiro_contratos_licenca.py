@@ -9,7 +9,9 @@
 #            contratos_condominio (quem gerou vem do login). Download sempre pelo backend (com login).
 #            Rotas (prefixo /api/financeiro): GET /contratos-licenca, GET /contratos-licenca/condominio/{id},
 #            GET /contratos-licenca/cnpj/{cnpj}, POST /contratos-licenca, GET /contratos-licenca/{id}/pdf
-# VERSÃO: 1.1.0 - contratada e contratante separadas no início (contato contato@econdominio.com.br / WhatsApp
+# VERSÃO: 1.2.0 - acima das linhas de assinatura: "Assinado digitalmente" (CONTRATADA, certificado) e "Assinado
+#                 eletronicamente" (CONTRATANTE, aceite com código); e-mail contato@ da CONTRATADA no bloco (2026-10-08)
+#         1.1.0 - contratada e contratante separadas no início (contato contato@econdominio.com.br / WhatsApp
 #                 (48) 92001-4309); planos pela qtd de unidades (usa a do cadastro se faltar); bloqueia o CNPJ da
 #                 contratada como contratante; cancelamento sem multa e sem aviso prévio, valendo até o fim do
 #                 período já pago (2026-10-08)
@@ -162,9 +164,11 @@ def excluir_contrato(contrato_id: int, db: Session = Depends(get_db), quem: dict
     """2026-10-08: exclui o registro de um contrato gerado com erro (só master). O PDF fica no storage, sem acesso."""
     if not quem.get("master"):
         raise HTTPException(status_code=403, detail="Só o master pode excluir contrato")
-    r = db.execute(text("SELECT id, razao_social, arquivo FROM contratos_condominio WHERE id = :i"), {"i": contrato_id}).fetchone()
+    r = db.execute(text("SELECT id, razao_social, arquivo, status FROM contratos_condominio WHERE id = :i"), {"i": contrato_id}).fetchone()
     if not r:
         raise HTTPException(status_code=404, detail="Contrato não encontrado")
+    if r.status != "gerado":  # 2026-10-08: congelado/enviado para assinatura não sai (tem trilha de eventos)
+        raise HTTPException(status_code=409, detail="Contrato já enviado para assinatura não pode ser excluído (cancele o fluxo)")
     db.execute(text("DELETE FROM contratos_condominio WHERE id = :i"), {"i": contrato_id})
     db.commit()
     logger.info("CONTRATO: #%s (%s, %s) excluído por %s", r.id, r.razao_social, r.arquivo, quem.get("nome"))
@@ -542,12 +546,14 @@ def montar_pdf(d: NovoContrato, plano: str, planos: list) -> bytes:
     local = f"Florianópolis/SC e {esc(d.cidade or '________')}/{esc(d.uf or '__')}, {_data_extenso(date.today())}."
     linha = "_" * 42
     ass = Table([
+        [P("<i>Assinado digitalmente</i><br/><font size=7>certificado digital da e-Condomínio</font>", s_cel),
+         P("<i>Assinado eletronicamente</i><br/><font size=7>aceite com código de confirmação — ver página de evidências</font>", s_cel)],
         [P(linha, s_cel), P(linha, s_cel)],
-        [P(f"<b>{CONTRATADA['nome']}</b><br/>CNPJ {CONTRATADA['cnpj']}<br/>CONTRATADA", s_cel),
+        [P(f"<b>{CONTRATADA['nome']}</b><br/>CNPJ {CONTRATADA['cnpj']}<br/>{CONTRATADA['email']}<br/>CONTRATADA", s_cel),
          P(f"<b>{esc(d.razao_social.strip())}</b><br/>CNPJ {esc(_fmt_cnpj(d.cnpj) or '________')}<br/>"
            f"{esc((d.representante or '').strip() or 'Representante legal / Síndico')}<br/>CONTRATANTE", s_cel)],
     ], colWidths=[w / 2, w / 2])
-    ass.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, 0), 28)]))
+    ass.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, 0), 22), ("BOTTOMPADDING", (0, 0), (-1, 0), 0)]))
     test = Table([
         [P(linha, s_cel), P(linha, s_cel)],
         [P("1. Nome: ______________________________<br/>CPF: _______________________________", s_cel),
