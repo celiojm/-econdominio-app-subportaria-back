@@ -14,7 +14,9 @@
 #            Rotas (equipe interna — master ou colaborador):
 #              POST /api/financeiro/contratos-licenca/{id}/preparar   → congela (idempotente)
 #              GET  /api/financeiro/contratos-licenca/{id}/assinatura → status, assinantes, eventos e verificação
-# VERSÃO: 1.5.0 - modo "empresa assina ANTES": no envio o contrato é assinado com o certificado (autorizado por quem
+# VERSÃO: 1.5.1 - WhatsApp do CONVITE também em segundo plano (a tela do financeiro desistia aos 30 s e mostrava erro
+#                 mesmo com o link enviado) (2026-10-10)
+#         1.5.0 - modo "empresa assina ANTES": no envio o contrato é assinado com o certificado (autorizado por quem
 #                 envia); após o aceite as evidências viram um PDF separado, também assinado, e conclui sozinho
 #         1.4.0 - WhatsApp lento: código por WhatsApp enviado em segundo plano (resposta na hora), timeout vira
 #                 "não confirmado" (não FALHOU); confirmar aceita QUALQUER código válido do convite (o atrasado também)
@@ -447,9 +449,15 @@ def _carregar_contrato(db: Session, contrato_id: int):
 
 
 # ─── equipe: enviar convite / cancelar ──────────────────────────────────────
+def _convite_whatsapp_bg(tel: str, texto: str, contrato_id: int):
+    ok = _enviar_whatsapp(tel, texto)
+    logger.info("ASSINATURA: convite por WhatsApp do contrato #%s: %s", contrato_id,
+                "enviado" if ok else ("sem confirmação" if ok is None else "FALHOU"))
+
+
 @router.post("/contratos-licenca/{contrato_id}/convites")
 def enviar_convite(contrato_id: int, dados: NovoConvite, request: Request, db: Session = Depends(get_db),
-                   quem: dict = Depends(usuario_interno)):
+                   quem: dict = Depends(usuario_interno), tarefas: BackgroundTasks = None):
     """Congela (se ainda não estiver), cria/atualiza o signatário (síndico) e manda o link por e-mail e/ou WhatsApp.
     Reenviar = chamar de novo: o link anterior é revogado."""
     email = (dados.email or "").strip().lower()
@@ -506,10 +514,14 @@ def enviar_convite(contrato_id: int, dados: NovoConvite, request: Request, db: S
                  f"O link vale até <b>{validade}</b> e é pessoal. Para assinar você vai informar seu CPF e um código que enviaremos.")
         envio["email"] = _enviar_email(email, f"Contrato e-Condomínio para assinatura — {c.razao_social}", _html_basico("Contrato para assinatura", corpo))
     if len(tel) >= 10:
-        envio["whatsapp"] = _enviar_whatsapp(tel, f"Olá, {dados.nome.strip()}! A e-Condomínio enviou o contrato do "
-                                                  f"*{c.razao_social}* para sua assinatura eletrônica."
-                                                  f"{' O contrato já está assinado digitalmente pela e-Condomínio.' if ja_assinado else ''}"
-                                                  f"\n\nLeia e assine aqui (vale até {validade}):\n{link}")
+        texto_wa = (f"Olá, {dados.nome.strip()}! A e-Condomínio enviou o contrato do *{c.razao_social}* para sua assinatura eletrônica."
+                    f"{' O contrato já está assinado digitalmente pela e-Condomínio.' if ja_assinado else ''}"
+                    f"\n\nLeia e assine aqui (vale até {validade}):\n{link}")
+        if tarefas is not None:
+            tarefas.add_task(_convite_whatsapp_bg, tel, texto_wa, contrato_id)   # servidor de WhatsApp pode levar minutos
+            envio["whatsapp"] = None   # "não confirmado" na tela; o resultado vai para o log
+        else:
+            envio["whatsapp"] = _enviar_whatsapp(tel, texto_wa)
     registrar_evento(db, contrato_id, "convite_enviado", "equipe", quem.get("usuario"), quem.get("nome"), request,
                      {"convite_id": conv, "assinante": dados.nome.strip(), "email": mascarar_email(email),
                       "whatsapp": mascarar_tel(tel), "envio": envio, "expira": validade}, c.hash_rascunho)
