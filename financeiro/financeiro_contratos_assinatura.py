@@ -14,7 +14,11 @@
 #            Rotas (equipe interna — master ou colaborador):
 #              POST /api/financeiro/contratos-licenca/{id}/preparar   → congela (idempotente)
 #              GET  /api/financeiro/contratos-licenca/{id}/assinatura → status, assinantes, eventos e verificação
-# VERSÃO: 1.3.0 - FASES 3/4: POST /{id}/assinar-empresa (master/colaborador autoriza → serviço ASSINADOR assina com o
+# VERSÃO: 1.5.0 - modo "empresa assina ANTES": no envio o contrato é assinado com o certificado (autorizado por quem
+#                 envia); após o aceite as evidências viram um PDF separado, também assinado, e conclui sozinho
+#         1.4.0 - WhatsApp lento: código por WhatsApp enviado em segundo plano (resposta na hora), timeout vira
+#                 "não confirmado" (não FALHOU); confirmar aceita QUALQUER código válido do convite (o atrasado também)
+#         1.3.0 - FASES 3/4: POST /{id}/assinar-empresa (master/colaborador autoriza → serviço ASSINADOR assina com o
 #                 certificado e valida), página de evidências, PDF final + evidências no storage, downloads e
 #                 verificação pública /api/assinatura/verificar/{uuid}
 #         1.2.0 - FASE 2: convite (link 7 dias), portal público /api/assinatura/{token}, código por e-mail/WhatsApp,
@@ -36,7 +40,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -203,7 +207,7 @@ def preparar_contrato(contrato_id: int, request: Request, db: Session = Depends(
 @router.get("/contratos-licenca/{contrato_id}/assinatura")
 def status_assinatura(contrato_id: int, db: Session = Depends(get_db), quem: dict = Depends(usuario_interno)):
     r = db.execute(text("""SELECT id, razao_social, status, hash_rascunho, hash_final, uuid_publico, congelado_em, assinado_em,
-                                  assinado_por_nome, versao_modelo
+                                  assinado_por_nome, versao_modelo, dados
                              FROM contratos_condominio WHERE id = :i"""), {"i": contrato_id}).fetchone()
     if not r:
         raise HTTPException(status_code=404, detail="Contrato não encontrado")
@@ -222,6 +226,7 @@ def status_assinatura(contrato_id: int, db: Session = Depends(get_db), quem: dic
         "assinantes": [{k: iso(v) for k, v in a.items()} for a in assinantes],
         "eventos": [{k: iso(v) for k, v in e.items()} for e in eventos],
         "cadeia": verificar_cadeia(db, contrato_id),
+        "modo_assinatura": modo_assinatura(r),
     }
 
 
@@ -320,7 +325,7 @@ def _enviar_email(dest: str, assunto: str, html: str) -> bool:
         return False
 
 
-def _enviar_whatsapp(tel: str, texto: str) -> bool:
+def _enviar_whatsapp(tel: str, texto: str) -> Optional[bool]:
     d = re.sub(r"\D", "", tel or "")
     if len(d) < 10:
         return False
@@ -334,8 +339,12 @@ def _enviar_whatsapp(tel: str, texto: str) -> bool:
         url = (f"{os.getenv('ZAPI_API_URL', 'http://191.252.221.192:8080')}/instances/{os.getenv('ZAPI_INSTANCE_ID', '')}"
                f"/token/{os.getenv('ZAPI_TOKEN', '')}/send-text")
         r = httpx.post(url, json={"phone": d, "message": texto},
-                       headers={"Client-Token": os.getenv("ZAPI_CLIENT_TOKEN", ""), "Content-Type": "application/json"}, timeout=15)
+                       headers={"Client-Token": os.getenv("ZAPI_CLIENT_TOKEN", ""), "Content-Type": "application/json"}, timeout=30)
         return r.status_code < 300
+    except httpx.TimeoutException:
+        # o servidor de WhatsApp próprio às vezes entrega mas demora a confirmar — não é falha certa
+        logger.warning("ASSINATURA: WhatsApp sem confirmação (%s): demorou mais de 30 s", mascarar_tel(d))
+        return None
     except Exception as e:
         logger.warning("ASSINATURA: WhatsApp falhou (%s): %s", mascarar_tel(d), e)
         return False
@@ -376,6 +385,56 @@ class NovoConvite(BaseModel):
     nome: str = Field(..., min_length=3, max_length=150)
     email: Optional[str] = Field(None, max_length=150)
     telefone: Optional[str] = Field(None, max_length=20)
+    empresa_assina_antes: bool = False   # 2026-10-10: enviar já assinado pela e-Condomínio
+
+
+def _dados_json(c) -> dict:
+    d = c.dados if hasattr(c, "dados") else None
+    if isinstance(d, dict):
+        return d
+    try:
+        return json.loads(d or "{}")
+    except (TypeError, ValueError):
+        return {}
+
+
+def modo_assinatura(c) -> str:
+    return _dados_json(c).get("modo_assinatura") or "empresa_depois"
+
+
+def _assinar_contrato_antes(db: Session, contrato_id: int, request: Request, quem: dict):
+    """Modo empresa_antes: assina o PDF gerado com o certificado ANTES de congelar/enviar. O PDF assinado passa a ser o
+    documento do contrato (o síndico lê e aceita esse arquivo); o gerado original fica registrado em dados.arquivo_original."""
+    c = _carregar_contrato(db, contrato_id)
+    if c.status != "gerado":
+        raise HTTPException(status_code=409, detail="Este contrato já foi preparado sem a assinatura da empresa. Gere um novo para enviar já assinado.")
+    original = baixar_documento(c.arquivo)
+    cert = _assinador("GET", "/saude", timeout=15)["certificado"]
+    r = _assinador("POST", "/assinar", {"pdf_b64": base64.b64encode(original).decode(), "anexos_b64": [],
+                                        "motivo": "Contratada — E-CONDOMINIO SISTEMAS DE GESTAO LTDA", "local": "Florianópolis/SC",
+                                        "campo": "Assinatura_eCondominio"}, timeout=120)
+    assinado = base64.b64decode(r["pdf_b64"])
+    if sha256(assinado) != r["sha256"] or not (r["validacao"]["integra"] and r["validacao"]["valida"]):
+        raise HTTPException(status_code=424, detail="A assinatura devolvida não passou na conferência")
+    arq = _subir_pdf(assinado, f"contrato_assinado_{contrato_id}_{datetime.now():%Y%m%d}")
+    n = db.execute(text("""UPDATE contratos_condominio
+                              SET arquivo = :a, versao = versao + 1,
+                                  dados = JSON_SET(dados, '$.modo_assinatura', 'empresa_antes', '$.arquivo_original', :o,
+                                                   '$.assinatura_autorizada_por', :q)
+                            WHERE id = :c AND status = 'gerado'"""),
+                   {"a": arq, "o": c.arquivo, "q": quem.get("nome") or "equipe", "c": contrato_id}).rowcount
+    if n != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="O contrato mudou ao mesmo tempo. Recarregue.")
+    db.execute(text("""INSERT INTO contratos_assinantes (contrato_id, papel, nome, status, aceito_em, metodo, certificado_impressao)
+                       VALUES (:c, 'empresa', 'E-CONDOMINIO SISTEMAS DE GESTAO LTDA', 'assinado', NOW(), 'certificado_a1', :imp)"""),
+               {"c": contrato_id, "imp": cert.get("impressao_sha256")})
+    registrar_evento(db, contrato_id, "assinado_antes", "equipe", quem.get("usuario"), quem.get("nome"), request,
+                     {"autorizado_por": quem.get("nome"), "certificado_titular": cert.get("titular"), "certificado_serial": cert.get("serial"),
+                      "certificado_sha256": cert.get("impressao_sha256"), "validacao": r["validacao"], "arquivo_original": c.arquivo},
+                     r["sha256"])
+    db.commit()
+    logger.info("ASSINATURA: contrato #%s assinado pela empresa ANTES do envio (autorizado por %s)", contrato_id, quem.get("nome"))
 
 
 def _carregar_contrato(db: Session, contrato_id: int):
@@ -400,9 +459,13 @@ def enviar_convite(contrato_id: int, dados: NovoConvite, request: Request, db: S
     if not email and len(tel) < 10:
         raise HTTPException(status_code=400, detail="Informe o e-mail ou o WhatsApp do síndico")
     c = _carregar_contrato(db, contrato_id)
+    if dados.empresa_assina_antes and modo_assinatura(c) != "empresa_antes":
+        _assinar_contrato_antes(db, contrato_id, request, quem)   # assina com o certificado antes de congelar/enviar
+        c = _carregar_contrato(db, contrato_id)
     if c.status == "gerado":
         preparar_contrato(contrato_id, request, db, quem)
         c = _carregar_contrato(db, contrato_id)
+    ja_assinado = modo_assinatura(c) == "empresa_antes"
     if c.status not in ("pronto",) + ESTADOS_PORTAL + ("expirado",):
         raise HTTPException(status_code=409, detail=f"Contrato em estado '{c.status}' não pode receber convite")
     token = secrets.token_urlsafe(32)
@@ -436,19 +499,23 @@ def enviar_convite(contrato_id: int, dados: NovoConvite, request: Request, db: S
     envio = {}
     if email:
         corpo = (f"Olá, <b>{_esc(dados.nome.strip())}</b>!<br><br>A e-Condomínio enviou o <b>Contrato de Licença de Uso</b> do "
-                 f"<b>{_esc(c.razao_social)}</b> para sua assinatura eletrônica.<br><br>"
+                 f"<b>{_esc(c.razao_social)}</b> para sua assinatura eletrônica."
+                 f"{' O contrato já está <b>assinado digitalmente pela e-Condomínio</b>.' if ja_assinado else ''}<br><br>"
                  f'<a href="{link}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 18px;border-radius:8px;'
                  f'text-decoration:none;font-weight:bold">Ler e assinar o contrato</a><br><br>'
                  f"O link vale até <b>{validade}</b> e é pessoal. Para assinar você vai informar seu CPF e um código que enviaremos.")
         envio["email"] = _enviar_email(email, f"Contrato e-Condomínio para assinatura — {c.razao_social}", _html_basico("Contrato para assinatura", corpo))
     if len(tel) >= 10:
         envio["whatsapp"] = _enviar_whatsapp(tel, f"Olá, {dados.nome.strip()}! A e-Condomínio enviou o contrato do "
-                                                  f"*{c.razao_social}* para sua assinatura eletrônica.\n\nLeia e assine aqui (vale até {validade}):\n{link}")
+                                                  f"*{c.razao_social}* para sua assinatura eletrônica."
+                                                  f"{' O contrato já está assinado digitalmente pela e-Condomínio.' if ja_assinado else ''}"
+                                                  f"\n\nLeia e assine aqui (vale até {validade}):\n{link}")
     registrar_evento(db, contrato_id, "convite_enviado", "equipe", quem.get("usuario"), quem.get("nome"), request,
                      {"convite_id": conv, "assinante": dados.nome.strip(), "email": mascarar_email(email),
                       "whatsapp": mascarar_tel(tel), "envio": envio, "expira": validade}, c.hash_rascunho)
     db.commit()
-    return {"success": True, "convite_id": conv, "link": link, "expira": validade, "envio": envio, "modo_teste": not envio_real()}
+    return {"success": True, "convite_id": conv, "link": link, "expira": validade, "envio": envio, "modo_teste": not envio_real(),
+            "ja_assinado_pela_empresa": ja_assinado}
 
 
 @router.post("/contratos-licenca/{contrato_id}/cancelar")
@@ -472,7 +539,7 @@ def _convite(db: Session, token: str):
     r = db.execute(text("""
         SELECT v.id AS convite_id, v.expira_em, v.revogado_em, v.aberto_em, v.canal,
                c.id AS contrato_id, c.razao_social, c.cnpj, c.status, c.arquivo, c.hash_rascunho, c.plano, c.valor,
-               c.inicio_vigencia, c.primeiro_vencimento,
+               c.inicio_vigencia, c.primeiro_vencimento, c.dados,
                a.id AS assinante_id, a.nome, a.email, a.telefone, a.cpf_mascarado, a.cpf_hash, a.status AS assinante_status, a.aceito_em
           FROM contratos_convites v
           JOIN contratos_condominio c ON c.id = v.contrato_id
@@ -513,6 +580,7 @@ def portal_info(token: str, request: Request, db: Session = Depends(get_db)):
         "signatario": r.nome, "cpf_informado": r.cpf_mascarado, "canais": canais, "hash": r.hash_rascunho,
         "situacao": "aceito" if r.assinante_status == "aceito" else ("recusado" if r.status == "recusado" else "pendente"),
         "aceito_em": r.aceito_em.isoformat() if r.aceito_em else None, "texto_aceite": TEXTO_ACEITE,
+        "assinado_pela_empresa": modo_assinatura(r) == "empresa_antes",
         "expira_em": r.expira_em.isoformat(),
     }
 
@@ -535,8 +603,15 @@ class PedidoCodigo(BaseModel):
     canal: str = Field(..., pattern="^(email|whatsapp)$")
 
 
+def _codigo_whatsapp_bg(destino: str, codigo: str, contrato_id: int):
+    """Envio do código por WhatsApp fora da requisição (o servidor próprio pode levar minutos)."""
+    ok = _enviar_whatsapp(destino, f"Seu código para assinar o contrato e-Condomínio é *{codigo}*.\nVale por {OTP_MINUTOS} minutos. Não compartilhe.")
+    logger.info("ASSINATURA: código por WhatsApp do contrato #%s: %s", contrato_id,
+                "enviado" if ok else ("sem confirmação" if ok is None else "FALHOU"))
+
+
 @publico.post("/{token}/codigo")
-def portal_pedir_codigo(token: str, dados: PedidoCodigo, request: Request, db: Session = Depends(get_db)):
+def portal_pedir_codigo(token: str, dados: PedidoCodigo, request: Request, tarefas: BackgroundTasks, db: Session = Depends(get_db)):
     r = _convite(db, token)
     if r.status not in ESTADOS_PORTAL:
         raise HTTPException(status_code=409, detail="Este contrato não está mais aguardando assinatura")
@@ -569,14 +644,15 @@ def portal_pedir_codigo(token: str, dados: PedidoCodigo, request: Request, db: S
                            _html_basico("Seu código de assinatura", f"Seu código é <b style='font-size:22px;letter-spacing:4px'>{codigo}</b>."
                                         f"<br><br>Vale por {OTP_MINUTOS} minutos. Não compartilhe com ninguém."))
     else:
-        ok = _enviar_whatsapp(destino, f"Seu código para assinar o contrato e-Condomínio é *{codigo}*.\nVale por {OTP_MINUTOS} minutos. Não compartilhe.")
+        tarefas.add_task(_codigo_whatsapp_bg, destino, codigo, r.contrato_id)
+        ok = True   # pedido aceito; a entrega pode demorar (o resultado vai para o log)
     registrar_evento(db, r.contrato_id, "codigo_enviado" if ok else "codigo_falhou", "sindico", r.assinante_id, r.nome, request,
                      {"otp_id": otp, "canal": dados.canal, "destino": mascarar_email(destino) if dados.canal == "email" else mascarar_tel(destino),
                       "cpf": mascarar_cpf(dados.cpf)}, r.hash_rascunho)
     db.commit()
     if not ok:
         raise HTTPException(status_code=424, detail="Não foi possível enviar o código agora. Tente o outro canal ou mais tarde.")
-    return {"success": True, "canal": dados.canal, "expira_minutos": OTP_MINUTOS}
+    return {"success": True, "canal": dados.canal, "expira_minutos": OTP_MINUTOS, "pode_demorar": dados.canal == "whatsapp"}
 
 
 class ConfirmaCodigo(BaseModel):
@@ -589,13 +665,16 @@ def portal_confirmar_codigo(token: str, dados: ConfirmaCodigo, request: Request,
     r = _convite(db, token)
     if r.status not in ESTADOS_PORTAL:
         raise HTTPException(status_code=409, detail="Este contrato não está mais aguardando assinatura")
-    o = db.execute(text("""SELECT id, codigo_hash, expira_em, tentativas, canal FROM contratos_otp
-                            WHERE convite_id = :v AND usado_em IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE"""),
-                   {"v": r.convite_id}).fetchone()
-    if not o or o.expira_em < _agora() or o.tentativas >= OTP_MAX_TENTATIVAS:
+    validos = db.execute(text("""SELECT id, codigo_hash, expira_em, tentativas, canal FROM contratos_otp
+                                  WHERE convite_id = :v AND usado_em IS NULL AND expira_em > NOW() AND tentativas < :mx
+                                  ORDER BY id DESC FOR UPDATE"""), {"v": r.convite_id, "mx": OTP_MAX_TENTATIVAS}).fetchall()
+    if not validos:
         db.rollback()
         raise HTTPException(status_code=400, detail="Código expirado. Peça um novo código.")
-    ok = hmac.compare_digest(o.codigo_hash, hmac_hex(f"otp:{r.convite_id}:{dados.codigo}".encode()))
+    alvo = hmac_hex(f"otp:{r.convite_id}:{dados.codigo}".encode())
+    certo = next((v for v in validos if hmac.compare_digest(v.codigo_hash, alvo)), None)   # o código atrasado também vale
+    o = certo or validos[0]
+    ok = certo is not None
     if not ok:
         db.execute(text("UPDATE contratos_otp SET tentativas = tentativas + 1 WHERE id = :o"), {"o": o.id})
         registrar_evento(db, r.contrato_id, "codigo_errado", "sindico", r.assinante_id, r.nome, request,
@@ -619,8 +698,20 @@ class Aceite(BaseModel):
     represento: bool
 
 
+def _concluir_empresa_antes_bg(contrato_id: int):
+    """Depois do aceite (modo empresa_antes): assina as evidências e conclui, em segundo plano."""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        _finalizar_empresa_antes(db, contrato_id, None, {"nome": None})
+    except Exception as e:
+        logger.warning("ASSINATURA: conclusão automática do contrato #%s falhou: %s", contrato_id, getattr(e, "detail", e))
+    finally:
+        db.close()
+
+
 @publico.post("/{token}/aceitar")
-def portal_aceitar(token: str, dados: Aceite, request: Request, db: Session = Depends(get_db)):
+def portal_aceitar(token: str, dados: Aceite, request: Request, tarefas: BackgroundTasks, db: Session = Depends(get_db)):
     r = _convite(db, token)
     if r.assinante_status == "aceito":
         return {"success": True, "situacao": "aceito", "aceito_em": r.aceito_em.isoformat() if r.aceito_em else None}
@@ -647,6 +738,8 @@ def portal_aceitar(token: str, dados: Aceite, request: Request, db: Session = De
                       "declarou_leitura": True, "declarou_representacao": True}, r.hash_rascunho)
     db.commit()
     logger.info("ASSINATURA: contrato #%s ACEITO pelo síndico (%s)", r.contrato_id, r.cpf_mascarado)
+    if modo_assinatura(r) == "empresa_antes":
+        tarefas.add_task(_concluir_empresa_antes_bg, r.contrato_id)   # empresa já assinou: falta só assinar as evidências
     return {"success": True, "situacao": "aceito"}
 
 
@@ -679,6 +772,7 @@ NOMES_EVENTO = {
     "codigo_enviado": "Código de confirmação enviado", "codigo_falhou": "Falha ao enviar código", "codigo_errado": "Código incorreto digitado",
     "codigo_confirmado": "Código confirmado", "aceito": "ACEITE ELETRÔNICO do contratante", "recusado": "Recusa do contratante",
     "cancelado": "Fluxo cancelado pela equipe", "assinatura_autorizada": "Assinatura da contratada autorizada", "falha": "Falha na assinatura",
+    "assinado_antes": "Contrato ASSINADO pela contratada (certificado digital) antes do envio",
 }
 
 
@@ -723,7 +817,7 @@ def _subir_pdf(pdf: bytes, prefixo: str) -> str:
         raise HTTPException(status_code=424, detail="Não foi possível salvar o PDF no storage")
 
 
-def montar_evidencias(db: Session, c, sindico, cert: dict, autorizado_por: str) -> tuple:
+def montar_evidencias(db: Session, c, sindico, cert: dict, autorizado_por: str, modo: str = "empresa_depois") -> tuple:
     """Página(s) de evidências em PDF + JSON canônico (o hash do JSON vai no evento final)."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -759,6 +853,7 @@ def montar_evidencias(db: Session, c, sindico, cert: dict, autorizado_por: str) 
                        "certificado_serial": cert.get("serial"), "certificado_valido_ate": cert.get("valido_ate"),
                        "certificado_sha256": cert.get("impressao_sha256"), "assinatura_autorizada_por": autorizado_por},
         "gerado_em_utc": datetime.now(timezone.utc).isoformat(), "verificacao": f"{VERIFICAR_URL}/{c.uuid_publico}",
+        "modo_assinatura": modo,
     }
     json_canonico = json.dumps(evid, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
@@ -801,8 +896,11 @@ def montar_evidencias(db: Session, c, sindico, cert: dict, autorizado_por: str) 
         Paragraph(f"Eventos: {cadeia['eventos']} — último elo da cadeia: {cadeia.get('ultimo_hash')}", s_c),
         Paragraph(f"Verificação: {VERIFICAR_URL}/{c.uuid_publico} — hash destas evidências (JSON): {sha256(json_canonico)}", s_c),
         Spacer(1, 6),
-        Paragraph("Este documento reúne o contrato aceito e esta página de evidências e foi assinado digitalmente pela CONTRATADA em seguida. "
-                  "Qualquer alteração posterior invalida a assinatura digital.", s_p),
+        Paragraph(("O contrato aceito (SHA-256 acima) foi assinado digitalmente pela CONTRATADA ANTES do envio ao contratante; esta "
+                   "página de evidências é um documento separado, também assinado digitalmente pela CONTRATADA após o aceite. "
+                   if modo == "empresa_antes" else
+                   "Este documento reúne o contrato aceito e esta página de evidências e foi assinado digitalmente pela CONTRATADA em seguida. ")
+                  + "Qualquer alteração posterior invalida a assinatura digital.", s_p),
     ]
     buf = io.BytesIO()
     SimpleDocTemplate(buf, pagesize=A4, leftMargin=1.7 * cm, rightMargin=1.7 * cm, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
@@ -814,10 +912,12 @@ def montar_evidencias(db: Session, c, sindico, cert: dict, autorizado_por: str) 
 def assinar_empresa(contrato_id: int, request: Request, db: Session = Depends(get_db), quem: dict = Depends(usuario_interno)):
     """Master ou colaborador autoriza: monta evidências, o ASSINADOR assina com o certificado da empresa e valida,
     guarda o PDF final. Repetir não assina duas vezes (chave de idempotência por hash do documento aceito)."""
-    c = db.execute(text("""SELECT id, razao_social, cnpj, status, arquivo, hash_rascunho, uuid_publico, versao_modelo, hash_final
+    c = db.execute(text("""SELECT id, razao_social, cnpj, status, arquivo, hash_rascunho, uuid_publico, versao_modelo, hash_final, dados
                              FROM contratos_condominio WHERE id = :i"""), {"i": contrato_id}).fetchone()
     if not c:
         raise HTTPException(status_code=404, detail="Contrato não encontrado")
+    if modo_assinatura(c) == "empresa_antes" and c.status != "concluido":
+        return _finalizar_empresa_antes(db, contrato_id, request, quem)   # empresa já assinou: concluir (assinar evidências)
     if c.status == "concluido":
         return {"success": True, "status": "concluido", "hash_final": c.hash_final, "ja_estava_assinado": True}
     if c.status not in ("aceito", "falha"):
@@ -874,6 +974,65 @@ def assinar_empresa(contrato_id: int, request: Request, db: Session = Depends(ge
     db.commit()
     logger.info("ASSINATURA: contrato #%s CONCLUÍDO (assinado A1, autorizado por %s, sha256 %s)", contrato_id, quem.get("nome"), h_final[:16])
     return {"success": True, "status": "concluido", "hash_final": h_final, "validacao": r["validacao"], "certificado": cert.get("titular")}
+
+
+def _finalizar_empresa_antes(db: Session, contrato_id: int, request: Optional[Request], quem: dict) -> dict:
+    """Modo empresa_antes, após o aceite: evidências em PDF separado, assinadas com o certificado; o contrato (já assinado)
+    é o arquivo final. Idempotente; em falha fica 'falha' e o botão da equipe tenta de novo."""
+    c = db.execute(text("""SELECT id, razao_social, cnpj, status, arquivo, hash_rascunho, uuid_publico, versao_modelo, hash_final, dados
+                             FROM contratos_condominio WHERE id = :i"""), {"i": contrato_id}).fetchone()
+    if not c:
+        raise HTTPException(status_code=404, detail="Contrato não encontrado")
+    if c.status == "concluido":
+        return {"success": True, "status": "concluido", "hash_final": c.hash_final, "ja_estava_assinado": True}
+    if c.status not in ("aceito", "falha"):
+        raise HTTPException(status_code=409, detail="Só dá para concluir depois do aceite do contratante")
+    sindico = db.execute(text("""SELECT id, nome, cpf_mascarado, email, telefone, metodo FROM contratos_assinantes
+                                  WHERE contrato_id = :c AND papel = 'sindico' AND status = 'aceito' ORDER BY id DESC LIMIT 1"""),
+                         {"c": contrato_id}).fetchone()
+    if not sindico:
+        raise HTTPException(status_code=409, detail="Não há aceite do contratante registrado")
+    autorizado = _dados_json(c).get("assinatura_autorizada_por") or "equipe"
+    chave = f"evidencias:{contrato_id}:{c.hash_rascunho}"
+    if db.execute(text("UPDATE contratos_condominio SET status = 'assinando', versao = versao + 1 WHERE id = :c AND status IN ('aceito','falha')"),
+                  {"c": contrato_id}).rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A conclusão já está em andamento")
+    db.execute(text("""INSERT INTO contratos_assinatura_jobs (contrato_id, chave_idempotencia, status, tentativas, solicitado_por, iniciado_em)
+                       VALUES (:c, :k, 'assinando', 1, :q, NOW())
+                       ON DUPLICATE KEY UPDATE status = 'assinando', tentativas = tentativas + 1, iniciado_em = NOW(), ultimo_erro = NULL"""),
+               {"c": contrato_id, "k": chave, "q": quem.get("nome") or "automático (após o aceite)"})
+    db.commit()
+    try:
+        cert = _assinador("GET", "/saude", timeout=15)["certificado"]
+        contrato_pdf = baixar_documento(c.arquivo)
+        if sha256(contrato_pdf) != c.hash_rascunho:
+            raise HTTPException(status_code=409, detail="O PDF guardado não confere com o documento aceito")
+        ev_pdf, ev_json = montar_evidencias(db, c, sindico, cert, autorizado, "empresa_antes")
+        r = _assinador("POST", "/assinar", {"pdf_b64": base64.b64encode(ev_pdf).decode(), "anexos_b64": [],
+                                            "motivo": "Evidências do aceite — E-CONDOMINIO SISTEMAS DE GESTAO LTDA", "local": "Florianópolis/SC",
+                                            "campo": "Assinatura_eCondominio_Evidencias"}, timeout=120)
+        ev_assinado = base64.b64decode(r["pdf_b64"])
+        if sha256(ev_assinado) != r["sha256"] or not (r["validacao"]["integra"] and r["validacao"]["valida"]):
+            raise HTTPException(status_code=424, detail="A assinatura das evidências não passou na conferência")
+        arq_evid = _subir_pdf(ev_assinado, f"evidencias_assinadas_{contrato_id}_{datetime.now():%Y%m%d}")
+    except HTTPException as e:
+        _falha_assinatura(db, contrato_id, chave, e.detail, request, quem, c.hash_rascunho)
+        raise
+    except Exception as e:
+        _falha_assinatura(db, contrato_id, chave, f"erro interno ({type(e).__name__})", request, quem, c.hash_rascunho)
+        raise HTTPException(status_code=424, detail="Falha ao concluir — tente de novo")
+    db.execute(text("""UPDATE contratos_condominio SET status = 'concluido', hash_final = :hf, arquivo_final = :af, arquivo_evidencias = :ae,
+                              hash_evidencias = :he, assinado_em = NOW(), assinado_por_nome = :q, versao = versao + 1 WHERE id = :c"""),
+               {"hf": c.hash_rascunho, "af": c.arquivo, "ae": arq_evid, "he": r["sha256"], "q": autorizado, "c": contrato_id})
+    db.execute(text("UPDATE contratos_assinatura_jobs SET status = 'ok', finalizado_em = NOW() WHERE chave_idempotencia = :k"), {"k": chave})
+    registrar_evento(db, contrato_id, "assinado", "sistema", None, "Serviço assinador", request,
+                     {"modo": "empresa_antes", "hash_contrato_assinado": c.hash_rascunho, "hash_evidencias_assinadas": r["sha256"],
+                      "hash_evidencias_json": sha256(ev_json), "certificado_titular": cert.get("titular"),
+                      "certificado_serial": cert.get("serial"), "validacao": r["validacao"], "autorizado_por": autorizado}, r["sha256"])
+    db.commit()
+    logger.info("ASSINATURA: contrato #%s CONCLUÍDO (empresa assinou antes; evidências assinadas)", contrato_id)
+    return {"success": True, "status": "concluido", "hash_final": c.hash_rascunho, "validacao": r["validacao"], "certificado": cert.get("titular")}
 
 
 def _falha_assinatura(db: Session, contrato_id: int, chave: str, motivo: str, request: Request, quem: dict, hash_doc: Optional[str]):
