@@ -1,7 +1,11 @@
 # ================================================================================
 #  PATH: backend/financeiro/financeiro_sync.py
 #  DESCRIPTION: Sincronização UNIFICADA - Pagamentos Asaas + Validades + Assinaturas
-#  VERSÃO: 2.0.0 - Endpoint único para todas as sincronizações
+#  VERSÃO: 2.1.0 - 2026-10-14: validade pela regra única (validade_pagamento.py):
+#                  pagamento que acabou de virar pago soma a partir da validade atual;
+#                  pagamento já registrado só garante data_pagamento + período.
+#                  Antes: ao criar a assinatura não atualizava condominios.validade_ate
+#                  e comparava com assinaturas (não com o condomínio).
 # ================================================================================
 
 from typing import Optional, List
@@ -16,6 +20,7 @@ import os
 import re
 
 from app.database import get_db
+from .validade_pagamento import STATUS_PAGO, dias_pela_descricao, dias_do_plano, aplicar_pagamento
 
 logger = logging.getLogger(__name__)
 
@@ -46,54 +51,6 @@ def get_asaas_headers():
 
 # ================================================================================
 #  FUNÇÕES AUXILIARES
-# ================================================================================
-
-def extrair_dias_do_plano(descricao: str) -> int:
-    """
-    Extrai os dias de validade da descrição do plano.
-    Ex: "Até 50 unidades - 30 dias" -> 30
-    """
-    if not descricao:
-        return 30  # default
-    
-    descricao_lower = descricao.lower()
-    
-    # Tentar extrair número antes de "dias"
-    match = re.search(r'(\d+)\s*dias?', descricao_lower)
-    if match:
-        return int(match.group(1))
-    
-    # Padrões conhecidos
-    if 'trimestral' in descricao_lower or '90' in descricao:
-        return 90
-    if 'semestral' in descricao_lower or '180' in descricao:
-        return 180
-    if 'anual' in descricao_lower or '365' in descricao:
-        return 365
-    
-    return 30  # default mensal
-
-
-def calcular_nova_validade(validade_atual: date, dias: int, data_pagamento: date = None) -> date:
-    """
-    Calcula nova validade baseada na data do pagamento.
-    Se a validade atual for maior que data_pagamento + dias, mantém a atual.
-    Caso contrário, usa data_pagamento + dias.
-    """
-    if data_pagamento is None:
-        data_pagamento = date.today()
-    
-    nova_validade = data_pagamento + timedelta(days=dias)
-    
-    # Se já tem validade maior, mantém a maior
-    if validade_atual and validade_atual > nova_validade:
-        return validade_atual
-    
-    return nova_validade
-
-
-# ================================================================================
-#  ENDPOINT PRINCIPAL - SINCRONIZAÇÃO UNIFICADA
 # ================================================================================
 
 @router.post("/sync/pagamentos")
@@ -368,10 +325,12 @@ async def processar_pagamento_completo(db: Session, client: httpx.AsyncClient, p
         
         # Verificar se cobrança já existe
         result = db.execute(
-            text("SELECT id_cobranca FROM cobrancas WHERE asaas_payment_id = :payment_id"),
+            text("SELECT id_cobranca, status FROM cobrancas WHERE asaas_payment_id = :payment_id"),
             {"payment_id": asaas_payment_id}
         )
         cobranca_existente = result.fetchone()
+        # True = a cobrança vira paga agora (soma validade); False = já estava paga (só revisa)
+        pagamento_novo = not (cobranca_existente and cobranca_existente[1] in STATUS_PAGO)
         
         if cobranca_existente:
             # Atualizar cobrança existente
@@ -464,21 +423,23 @@ async def processar_pagamento_completo(db: Session, client: httpx.AsyncClient, p
         # PASSO 3: Criar/atualizar assinatura e validade
         # ====================================================================
         
-        # Extrair dias do plano
-        dias_validade = extrair_dias_do_plano(descricao)
+        # Dias: período escrito na cobrança paga > plano do cadastro > 30
+        plano_row = db.execute(
+            text("SELECT plano_selecionado FROM condominios WHERE id = :id"),
+            {"id": id_condominio}
+        ).fetchone()
+        dias_validade = (dias_pela_descricao(descricao)
+                         or dias_do_plano(plano_row[0] if plano_row else None)
+                         or 30)
         resultado["dias_plano"] = dias_validade
         
-        # Verificar se existe assinatura para este condomínio
-        result = db.execute(
-            text("SELECT id_assinatura, validade_ate FROM assinaturas WHERE id_condominio = :id_cond"),
+        # Criar assinatura se não existir (a validade é acertada logo abaixo)
+        assinatura = db.execute(
+            text("SELECT id_assinatura FROM assinaturas WHERE id_condominio = :id_cond"),
             {"id_cond": id_condominio}
-        )
-        assinatura = result.fetchone()
+        ).fetchone()
         
         if not assinatura:
-            # Criar assinatura
-            nova_validade = calcular_nova_validade(None, dias_validade, data_pagamento)
-            
             db.execute(
                 text("""
                     INSERT INTO assinaturas (
@@ -486,7 +447,7 @@ async def processar_pagamento_completo(db: Session, client: httpx.AsyncClient, p
                         validade_ate, status, renovacao_automatica, data_criacao
                     ) VALUES (
                         :id_cond, :tipo_plano, :valor, 'MONTHLY', :data_inicio,
-                        :validade_ate, 'ativa', 1, NOW()
+                        NULL, 'ativa', 1, NOW()
                     )
                 """),
                 {
@@ -494,59 +455,44 @@ async def processar_pagamento_completo(db: Session, client: httpx.AsyncClient, p
                     "tipo_plano": descricao or f"Plano {dias_validade} dias",
                     "valor": float(valor),
                     "data_inicio": date.today().isoformat(),
-                    "validade_ate": nova_validade.isoformat()
                 }
             )
-            
             resultado["assinatura_criada"] = True
+            logger.info(f"✅ Assinatura criada - {condominio_nome}")
+        
+        validade_anterior, nova_validade, alterou = aplicar_pagamento(
+            db, id_condominio, dias_validade, data_pagamento, pagamento_novo=pagamento_novo
+        )
+        
+        if alterou:
+            db.execute(
+                text("""
+                    UPDATE assinaturas
+                    SET tipo_plano = :tipo_plano, valor = :valor, data_renovacao = :data_renovacao
+                    WHERE id_condominio = :id_cond
+                """),
+                {
+                    "tipo_plano": descricao or f"Plano {dias_validade} dias",
+                    "valor": float(valor),
+                    "data_renovacao": date.today().isoformat(),
+                    "id_cond": id_condominio
+                }
+            )
+            resultado["validade_atualizada"] = True
+            resultado["validade_anterior"] = validade_anterior.isoformat() if validade_anterior else None
             resultado["nova_validade"] = nova_validade.isoformat()
-            
-            # Buscar assinatura recém criada
-            result = db.execute(
-                text("SELECT id_assinatura, validade_ate FROM assinaturas WHERE id_condominio = :id_cond"),
+            logger.info(f"✅ Validade atualizada - {condominio_nome}: {validade_anterior} → {nova_validade}")
+        else:
+            # Assinatura recém-criada (ou atrasada) acompanha a validade do condomínio
+            db.execute(
+                text("""
+                    UPDATE assinaturas a JOIN condominios c ON c.id = a.id_condominio
+                    SET a.validade_ate = c.validade_ate
+                    WHERE a.id_condominio = :id_cond
+                      AND (a.validade_ate IS NULL OR a.validade_ate < c.validade_ate)
+                """),
                 {"id_cond": id_condominio}
             )
-            assinatura = result.fetchone()
-            
-            logger.info(f"✅ Assinatura criada - {condominio_nome}: validade até {nova_validade}")
-        
-        # Atualizar validade da assinatura
-        if assinatura:
-            validade_atual = assinatura[1]
-            nova_validade = calcular_nova_validade(validade_atual, dias_validade, data_pagamento)
-            
-            # Só atualiza se a nova validade for maior que a atual
-            if not validade_atual or nova_validade > validade_atual:
-                db.execute(
-                    text("""
-                        UPDATE assinaturas 
-                        SET validade_ate = :validade, 
-                            tipo_plano = :tipo_plano,
-                            valor = :valor,
-                            data_renovacao = :data_renovacao,
-                            data_atualizacao = NOW()
-                        WHERE id_condominio = :id_cond
-                    """),
-                    {
-                        "validade": nova_validade.isoformat(),
-                        "tipo_plano": descricao or f"Plano {dias_validade} dias",
-                        "valor": float(valor),
-                        "data_renovacao": date.today().isoformat(),
-                        "id_cond": id_condominio
-                    }
-                )
-                
-                # Atualizar também no condomínio
-                db.execute(
-                    text("UPDATE condominios SET validade_ate = :validade WHERE id = :id_cond"),
-                    {"validade": nova_validade.isoformat(), "id_cond": id_condominio}
-                )
-                
-                resultado["validade_atualizada"] = True
-                resultado["validade_anterior"] = validade_atual.isoformat() if validade_atual else None
-                resultado["nova_validade"] = nova_validade.isoformat()
-                
-                logger.info(f"✅ Validade atualizada - {condominio_nome}: {validade_atual} → {nova_validade}")
         
         return resultado
         

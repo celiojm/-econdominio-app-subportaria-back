@@ -4,8 +4,9 @@
 #  PATH: backend/financeiro/financeiro_webhook.py
 #  DESCRIPTION: Módulo financeiro – Econdomínio / Inforseg
 #               Webhook para receber callbacks do Asaas
-#  VERSÃO: 3.0 - CORRIGIDO: dias de validade lidos do banco (plano_selecionado)
-#                            não usa mais VALOR_DIAS_MAP hardcoded
+#  VERSÃO: 3.1 - 2026-10-14: 2º aviso do mesmo pagamento (CONFIRMED + RECEIVED) não soma
+#                validade nem reenvia e-mail; dias pelo período da cobrança paga
+#                (descrição) antes do plano do cadastro; regra em validade_pagamento.py
 # ================================================================================
 
 from datetime import datetime, date, timedelta
@@ -13,10 +14,11 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Header
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from pydantic import BaseModel
 
 from app.database import SessionLocal
+from .validade_pagamento import STATUS_PAGO, dias_pela_descricao, dias_do_plano, aplicar_pagamento
 
 import os
 import logging
@@ -44,60 +46,6 @@ class WebhookPayload(BaseModel):
     event: str
     payment: Optional[dict] = None
     subscription: Optional[dict] = None
-
-
-# ================================================================================
-#  MAPEAMENTO DE DIAS POR PLANO (usa plano_selecionado do banco)
-# ================================================================================
-
-# Mapeamento do nome do plano -> dias de validade
-# Usado como fallback quando não há id_assinatura/id_plano
-PLANO_DIAS_MAP = {
-    'mensal':     30,
-    'trimestral': 90,
-    'semestral':  180,
-    'anual':      360,
-}
-
-
-def inferir_dias_validade_por_plano(
-    plano_selecionado: str = None,
-    descricao: str = None
-) -> int:
-    """
-    Infere os dias de validade baseado no plano_selecionado do condomínio.
-    NÃO usa mais valor monetário como referência (valores são dinâmicos por qtd aptos).
-
-    Prioridade:
-    1. plano_selecionado do condomínio (campo no banco)
-    2. Descrição da cobrança
-    3. Default: 30 dias (mensal)
-    """
-    # 1. Pelo plano salvo no condomínio
-    if plano_selecionado:
-        plano_lower = plano_selecionado.lower().strip()
-        if plano_lower in PLANO_DIAS_MAP:
-            dias = PLANO_DIAS_MAP[plano_lower]
-            logger.info(f"📅 Dias inferidos pelo plano '{plano_selecionado}': {dias}")
-            return dias
-
-    # 2. Pela descrição da cobrança
-    if descricao:
-        desc_lower = descricao.lower()
-        if 'anual' in desc_lower:
-            return 360
-        elif 'semestral' in desc_lower:
-            return 180
-        elif 'trimestral' in desc_lower:
-            return 90
-        elif 'mensal' in desc_lower:
-            return 30
-
-    logger.warning(
-        f"⚠️ Não foi possível inferir dias de validade "
-        f"(plano={plano_selecionado}, desc={descricao}). Usando 30 dias (padrão mensal)."
-    )
-    return 30
 
 
 # ================================================================================
@@ -190,8 +138,8 @@ async def process_payment_confirmed(event: str, payment_data: dict):
     """
     Processa pagamento confirmado:
     1. Atualiza status da cobrança para 'pago'
-    2. Calcula dias de validade a partir do plano_selecionado do condomínio
-    3. Atualiza validade_ate do condomínio
+    2. Calcula dias pelo período da cobrança paga (descrição) > planos > plano do cadastro
+    3. Atualiza validade_ate do condomínio (validade_pagamento.aplicar_pagamento)
     4. Envia email de confirmação
     """
     asaas_payment_id = payment_data.get("id")
@@ -241,89 +189,75 @@ async def process_payment_confirmed(event: str, payment_data: dict):
             f"(ID: {id_condominio}, plano: {plano_selecionado})"
         )
 
-        # 1. Atualizar status da cobrança
+        # 1. Marcar a cobrança como paga — só se ainda não estava paga.
+        #    O Asaas manda PAYMENT_CONFIRMED e depois PAYMENT_RECEIVED do mesmo pagamento;
+        #    o 2º aviso não pode somar validade nem mandar e-mail de novo (2026-10-14).
         valor_pago = payment_data.get("value") or payment_data.get("netValue") or valor
+        data_pagamento = date.today()
+        for campo in ("paymentDate", "confirmedDate", "clientPaymentDate"):
+            if payment_data.get(campo):
+                try:
+                    data_pagamento = datetime.strptime(payment_data[campo][:10], "%Y-%m-%d").date()
+                    break
+                except ValueError:
+                    pass
 
-        db.execute(text("""
+        marcou = db.execute(text("""
             UPDATE cobrancas
             SET status = 'pago',
                 data_pagamento = :data_pagamento,
                 valor_pago = :valor_pago,
                 data_atualizacao = NOW()
             WHERE id_cobranca = :id_cobranca
-        """), {
-            "data_pagamento": date.today(),
+              AND (status IS NULL OR status NOT IN :ja_pago)
+        """).bindparams(bindparam("ja_pago", expanding=True)), {
+            "data_pagamento": data_pagamento,
             "valor_pago": valor_pago,
-            "id_cobranca": id_cobranca
-        })
+            "id_cobranca": id_cobranca,
+            "ja_pago": list(STATUS_PAGO),
+        }).rowcount
+
+        if not marcou:
+            db.commit()
+            logger.info(
+                f"↩️ {event} da cobrança {id_cobranca} ({condominio_nome}) já estava paga — "
+                f"validade não alterada, e-mail não reenviado"
+            )
+            return
 
         logger.info(f"✅ Cobrança {id_cobranca} marcada como PAGA")
 
-        # 2. Calcular dias de validade
-        dias_validade = None
+        # 2. Dias de validade: período escrito na cobrança paga > tabela planos > plano do cadastro
+        dias_validade = dias_pela_descricao(descricao)
+        if dias_validade:
+            logger.info(f"📅 Dias pela descrição da cobrança '{descricao}': {dias_validade}")
 
-        # Tentar pelo id_assinatura -> tabela planos (mais preciso)
-        if row.id_assinatura:
-            plano_result = db.execute(text("""
+        if not dias_validade and row.id_assinatura:
+            plano_row = db.execute(text("""
                 SELECT p.dias_validade
                 FROM assinaturas a
                 JOIN planos p ON p.id_plano = a.id_plano
                 WHERE a.id_assinatura = :id_assinatura
-            """), {"id_assinatura": row.id_assinatura})
-            plano_row = plano_result.fetchone()
+            """), {"id_assinatura": row.id_assinatura}).fetchone()
             if plano_row and plano_row.dias_validade:
                 dias_validade = plano_row.dias_validade
                 logger.info(f"📅 Dias obtidos da tabela planos: {dias_validade}")
 
-        # ✅ CORRIGIDO: usa plano_selecionado do condomínio (não valor monetário)
         if not dias_validade:
-            dias_validade = inferir_dias_validade_por_plano(
-                plano_selecionado=plano_selecionado,
-                descricao=descricao
-            )
+            dias_validade = dias_do_plano(plano_selecionado) or 30
+            logger.info(f"📅 Dias pelo plano do cadastro '{plano_selecionado}': {dias_validade}")
 
-        # 3. Calcular data base para nova validade
-        hoje = date.today()
-        if validade_atual and validade_atual > hoje:
-            data_base = validade_atual  # Soma a partir da validade atual (renovação antecipada)
-            logger.info(f"📅 Renovação antecipada — base: {validade_atual}")
-        else:
-            data_base = hoje            # Vencido ou sem validade — começa hoje
-            logger.info(f"📅 Vencido/novo — base: {hoje}")
+        # 3. Validade: soma a partir da validade atual (ou da data do pagamento, se vencida)
+        validade_anterior, nova_validade, _ = aplicar_pagamento(
+            db, id_condominio, dias_validade, data_pagamento, pagamento_novo=True
+        )
 
-        nova_validade = data_base + timedelta(days=dias_validade)
-
-        # 4. Atualizar validade do condomínio
-        db.execute(text("""
-            UPDATE condominios
-            SET validade_ate = :nova_validade,
-                assinatura_status = 'ativa'
-            WHERE id = :id_condominio
-        """), {
-            "nova_validade": nova_validade,
-            "id_condominio": id_condominio
-        })
+        db.commit()
 
         logger.info(
             f"🎉 VALIDADE ATUALIZADA! {condominio_nome}: "
-            f"{validade_atual} → {nova_validade} (+{dias_validade} dias)"
+            f"{validade_anterior} → {nova_validade} (+{dias_validade} dias)"
         )
-
-        # 5. Atualizar assinatura se existir
-        if row.id_assinatura:
-            db.execute(text("""
-                UPDATE assinaturas
-                SET validade_ate = :nova_validade,
-                    status = 'ativa',
-                    data_atualizacao = NOW()
-                WHERE id_assinatura = :id_assinatura
-            """), {
-                "nova_validade": nova_validade,
-                "id_assinatura": row.id_assinatura
-            })
-            logger.info(f"✅ Assinatura {row.id_assinatura} atualizada")
-
-        db.commit()
 
         # 6. Enviar email de confirmação (não bloqueia em caso de falha)
         email_destino = row.cobranca_email or row.email_financeiro or row.email
@@ -331,7 +265,7 @@ async def process_payment_confirmed(event: str, payment_data: dict):
             try:
                 from .financeiro_email import enviar_email_pagamento_confirmado
 
-                hoje_fmt = date.today().strftime("%d/%m/%Y")
+                hoje_fmt = data_pagamento.strftime("%d/%m/%Y")
                 validade_fmt = nova_validade.strftime("%d/%m/%Y")
                 dias_restantes = (nova_validade - date.today()).days
                 forma = payment_data.get("billingType") or "PIX"
