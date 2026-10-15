@@ -1,8 +1,15 @@
 # =============================================================================
 # Arquivo  : whatsapp_webhook.py
 # Caminho  : /home/visionlpr/app_subportaria_back/app/routers/whatsapp_webhook.py
-# Versao   : 2.11.0
-# Data     : 2026-09-02
+# Versao   : 2.12.0
+# Data     : 2026-09-02 (alteração 2026-10-14)
+#
+# Novidades v2.12.0 (2026-10-14):
+#   - Respostas do robô pelo número oficial (Meta) são cobradas como "Serviço".
+#     WHATSAPP_RESPOSTAS_META=false (padrão) → nenhuma resposta sai pela Meta
+#     (texto, botões, imagem); o que o morador fez continua gravado no banco.
+#     Log: RESPOSTA_META_SUPRIMIDA. Para religar: WHATSAPP_RESPOSTAS_META=true.
+#     O autocadastro passou para a página web /auto-cadastro (app/api/autocadastro_web.py).
 #
 # Novidades v2.11.0:
 #   - FIX: find_morador_by_phone_e_condominio (LIMIT 1) podia escolher morador
@@ -109,6 +116,18 @@ IMAGE_STORAGE_URL    = os.getenv("IMAGE_STORAGE_BASE_URL", "http://10.3.1.7:4000
 IMAGE_STORAGE_KEY    = os.getenv("IMAGE_STORAGE_API_KEY", "")
 META_API_VERSION     = os.getenv("META_API_VERSION", "v25.0")
 
+# 2026-10-14: resposta do robô pela Meta = mensagem de "Serviço" (cobrada). Desligada por padrão.
+RESPOSTAS_META_ATIVAS = os.getenv("WHATSAPP_RESPOSTAS_META", "false").strip().lower() in ("1", "true", "sim", "yes")
+
+
+def _resposta_suprimida(to_number: str, texto: str) -> bool:
+    """True = não envia (respostas pela Meta desligadas); só registra no log."""
+    if RESPOSTAS_META_ATIVAS:
+        return False
+    logger.info("RESPOSTA_META_SUPRIMIDA | para=...%s | %s",
+                re.sub(r"\D", "", to_number or "")[-4:], (texto or "").replace("\n", " ")[:80])
+    return True
+
 def _normalizar_bloco_wa(db, condominio_id, bloco):  # 2026-09-30: bloco padronizado
     try:
         from app.services.blocos import normalizar_bloco
@@ -195,6 +214,8 @@ def _meta_url():
 
 
 def send_whatsapp_interactive_buttons(to_number: str, body: str, buttons: list) -> bool:
+    if _resposta_suprimida(to_number, body):
+        return True
     if len(buttons) > 3:
         logger.error("Tentativa de enviar %d botoes, maximo permitido e 3", len(buttons))
         buttons = buttons[:3]
@@ -237,6 +258,8 @@ def send_whatsapp_interactive_buttons(to_number: str, body: str, buttons: list) 
 
 
 def send_whatsapp_text(to_number: str, body: str) -> bool:
+    if _resposta_suprimida(to_number, body):
+        return True
     token    = _send_token()
     phone_id = _send_phone_id()
     if not token or not phone_id:
@@ -266,6 +289,8 @@ def send_whatsapp_text(to_number: str, body: str) -> bool:
 
 
 def send_whatsapp_image_base64(to_number: str, image_base64: str, caption: str = "") -> bool:
+    if _resposta_suprimida(to_number, "[imagem] " + (caption or "")):
+        return True
     token    = _send_token()
     phone_id = _send_phone_id()
     if not token or not phone_id:
