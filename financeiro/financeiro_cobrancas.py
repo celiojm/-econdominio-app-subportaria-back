@@ -223,6 +223,12 @@ async def criar_cobranca(
             'complemento': getattr(condominio, 'complemento', ''),
             'bairro': getattr(condominio, 'bairro', ''),
         }
+        # 2026-10-15: o modelo Condominio não tem os campos de contato de cobrança — sem isto o
+        # e-mail do boleto ia sempre para o e-mail geral (cond.email). Lê direto do banco.
+        contato = db.execute(text("""SELECT cobranca_email, email_financeiro, cobranca_whats
+                                       FROM condominios WHERE id = :id"""), {"id": condominio.id}).mappings().first()
+        if contato:
+            cond_dict.update({k: v for k, v in contato.items() if v})
 
         # Buscar ou criar cliente no Asaas
         customer_id = await buscar_ou_criar_cliente_asaas(cond_dict, db)
