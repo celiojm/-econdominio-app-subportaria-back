@@ -10,7 +10,8 @@
 #            pronta), o robô do servidor chama /whatsapp-pedido e responde com um
 #            link pessoal (?t=token, 24 h). O número fica confirmado porque foi o
 #            próprio morador quem escreveu.
-# VERSÃO: 1.0.0 - criação
+# VERSÃO: 1.0.1 - bloco em maiúscula também no caso de reserva (2026-10-15)
+#         1.0.0 - criação
 # data criação: 2026-10-14 data alteração: 2026-10-14
 # ============================================================================
 
@@ -138,9 +139,9 @@ def _bloco(db, condominio_id: int, bloco: Optional[str]) -> Optional[str]:
         return None
     try:
         from app.services.blocos import normalizar_bloco
-        return (normalizar_bloco(db, condominio_id, b) or b)[:10]
+        return (normalizar_bloco(db, condominio_id, b) or b.upper())[:10]
     except Exception:
-        return b
+        return b.upper()
 
 
 def _unidade_id(db, condominio_id: int, apartamento: str, bloco: Optional[str]) -> Optional[int]:

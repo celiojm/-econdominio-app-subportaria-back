@@ -1,8 +1,15 @@
 # =============================================================================
 # Arquivo  : whatsapp_webhook.py
 # Caminho  : /home/visionlpr/app_subportaria_back/app/routers/whatsapp_webhook.py
-# Versao   : 2.12.0
-# Data     : 2026-09-02 (alteração 2026-10-14)
+# Versao   : 2.13.0
+# Data     : 2026-09-02 (alteração 2026-10-15)
+#
+# Novidades v2.13.0 (2026-10-15):
+#   - Conversa antiga de autocadastro pelo número oficial (CADASTRO_MORADOR|id → nome/apto/
+#     bloco) DESLIGADA: AUTOCADASTRO_WHATSAPP_META=false (padrão). Com as respostas da Meta
+#     desligadas ela rodava em silêncio (gravava etapas, podia criar cadastro sem a pessoa ver
+#     as perguntas, e dava DataError em bloco_parcial). O gatilho fica só registrado como
+#     autocadastro_meta_desligado. Autocadastro agora é pela página /auto-cadastro.
 #
 # Novidades v2.12.0 (2026-10-14):
 #   - Respostas do robô pelo número oficial (Meta) são cobradas como "Serviço".
@@ -118,6 +125,8 @@ META_API_VERSION     = os.getenv("META_API_VERSION", "v25.0")
 
 # 2026-10-14: resposta do robô pela Meta = mensagem de "Serviço" (cobrada). Desligada por padrão.
 RESPOSTAS_META_ATIVAS = os.getenv("WHATSAPP_RESPOSTAS_META", "false").strip().lower() in ("1", "true", "sim", "yes")
+# 2026-10-15: conversa antiga de autocadastro pela Meta desligada (autocadastro é pela página web)
+AUTOCADASTRO_META_ATIVO = os.getenv("AUTOCADASTRO_WHATSAPP_META", "false").strip().lower() in ("1", "true", "sim", "yes")
 
 
 def _resposta_suprimida(to_number: str, texto: str) -> bool:
@@ -2147,8 +2156,15 @@ async def receive_webhook(request: Request):
                         wa_id, profile_name, message_type, message_text, button_id,
                     )
 
-                    if handle_auto_cadastro(db, wa_id, message_text, message_text_norm, button_id):
+                    if AUTOCADASTRO_META_ATIVO and handle_auto_cadastro(db, wa_id, message_text, message_text_norm, button_id):
                         action_taken  = "auto_cadastro_processado"
+                        condominio_id = None
+                        morador_id    = None
+                        matched_phone = None
+                    elif not AUTOCADASTRO_META_ATIVO and re.match(r'^CADASTRO_MORADOR\|\d{1,6}$', (message_text or "").strip()):
+                        # 2026-10-15: QR/mensagem antiga — só registra (autocadastro agora é pela página)
+                        logger.info("AUTOCADASTRO_META_DESLIGADO | wa_id=...%s | %s", (wa_id or "")[-4:], (message_text or "").strip())
+                        action_taken  = "autocadastro_meta_desligado"
                         condominio_id = None
                         morador_id    = None
                         matched_phone = None

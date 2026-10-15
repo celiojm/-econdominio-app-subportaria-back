@@ -7,9 +7,10 @@
 #            normalizados) — nunca recusa. Letras/torres/quadras só juntam variação de
 #            maiúscula/minúscula e espaço.
 #            dados_do_morador: apto/bloco do cadastro quando a encomenda tem morador escolhido.
-# VERSÃO: 1.1.0 - caractere invisível (ex. U+3164, hífen suave) ou só pontuação = bloco vazio (2026-09-30)
+# VERSÃO: 1.2.0 - bloco sempre gravado em MAIÚSCULA (pedido do Célio, 2026-10-15)
+#         1.1.0 - caractere invisível (ex. U+3164, hífen suave) ou só pontuação = bloco vazio (2026-09-30)
 #         1.0.0 - criação (2026-09-30)
-# data criação: 2026-09-30 data alteração: 2026-09-30
+# data criação: 2026-09-30 data alteração: 2026-10-15
 # ============================================================================
 import re
 from typing import Optional
@@ -43,7 +44,7 @@ def chave_bloco(bloco) -> str:
 def normalizar_bloco(db, condominio_id, bloco) -> Optional[str]:
     if bloco is None:
         return None
-    b = limpar_texto(bloco)
+    b = limpar_texto(bloco).upper()  # 2026-10-15: bloco sempre em maiúscula
     if not b or not condominio_id:
         return b or None
     k = chave_bloco(b)
@@ -56,7 +57,7 @@ def normalizar_bloco(db, condominio_id, bloco) -> Optional[str]:
         GROUP BY TRIM(bloco)
     """), {"c": condominio_id}).fetchall()
     candidatos = [(r.n, limpar_texto(r.b)) for r in rows if chave_bloco(r.b) == k and limpar_texto(r.b)]
-    return max(candidatos)[1] if candidatos else b
+    return max(candidatos)[1].upper() if candidatos else b
 
 
 def dados_do_morador(db, morador_id, condominio_id) -> Optional[dict]:
