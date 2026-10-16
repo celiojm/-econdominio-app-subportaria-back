@@ -151,6 +151,8 @@ from app.api import whatsapp_entregas as whatsapp_entregas_api  # 2026-10-01: co
 app.include_router(whatsapp_entregas_api.router, prefix="/api/whatsapp-entregas", tags=["whatsapp-entregas"])
 from app.api import autocadastro_web as autocadastro_web_api  # 2026-10-14: autocadastro pela página web (QR/link)
 app.include_router(autocadastro_web_api.router, prefix="/api/autocadastro", tags=["autocadastro"])
+from app.api import ver_encomenda as ver_encomenda_api  # 2026-10-16: botão Ver encomenda do WhatsApp (público, por token)
+app.include_router(ver_encomenda_api.router, prefix="/api/ver-encomenda", tags=["ver-encomenda"])
 app.include_router(lotes.router, prefix="/api/lotes", tags=["lotes"])
 app.include_router(condominio.router, prefix="/api/condominios", tags=["condominios"])
 app.include_router(locais_armazenamento.router, prefix="/api/locais-armazenamento", tags=["locais-armazenamento"])

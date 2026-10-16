@@ -1,7 +1,14 @@
 # ==========================================================================================
 # send_grouped_whatsapp.py
 # Worker de envio agrupado WhatsApp
-# Versao: 3.2.0 - 2026-06-18
+# Versao: 3.3.1 - 2026-10-16
+#
+# Novidades v3.3.0:
+#   - ENCOMENDA_RECEBIDA com VER_ENCOMENDA_LINK_ENABLED=true usa recebimento_encomenda_link_ver
+#     (mesmos 5 params + botao URL "Ver encomenda" .../ver_encomenda?token={{1}}). O token e
+#     gerado no envio; na encomenda fica so o hash sha256 (token_visualizacao) e a validade.
+#     Falha ao gerar o token -> envia o recebimento_encomenda de antes (sem botao).
+#   - v3.3.1: VER_ENCOMENDA_LINK_CONDOMINIOS (ids separados por virgula; vazio = todos) para testar com 1 condominio.
 #
 # Novidades v3.2.0:
 #   - Template trocado de chegada_encomenda_v3 para aviso_chegada_encomenda_v5.
@@ -38,9 +45,11 @@
 #   v2.4.0 - SQLAlchemy substituindo pymysql
 # ==========================================================================================
 
+import hashlib
 import json
 import os
 import re
+import secrets
 import time
 import random
 import logging
@@ -90,6 +99,30 @@ META_API_URL            = f"https://graph.facebook.com/{META_API_VERSION}/{META_
 META_TEMPLATE_NOVO_COND = os.getenv("META_TEMPLATE_CONFIRMACAO", "novo_condominio")
 META_TEMPLATE_CADASTRO  = os.getenv("META_TEMPLATE_CADASTRO", "cadastro_e_condominio_morador")
 META_TEMPLATE_LEMBRETE  = os.getenv("META_TEMPLATE_LEMBRETE", "reaviso_encomenda")
+# 2026-10-12: substituto de META_TEMPLATE_CADASTRO com 1 so botao (CONFIRMAR_MORADOR).
+# So 1 botao - sem NEGAR_MORADOR (decisao do Celio: nenhum template tera botao, exceto
+# o de confirmar morador, que continua so com confirmar). Desativado por padrao - so
+# ligar depois do template aprovado na Meta e testado ponta a ponta.
+META_TEMPLATE_CADASTRO_V2 = os.getenv("META_TEMPLATE_CADASTRO_V2", "confirmacao_cadastro_morador_2026")
+META_TEMPLATE_CADASTRO_V2_ENABLED = os.getenv("META_TEMPLATE_CADASTRO_V2_ENABLED", "false").lower() in ("true", "1", "yes")
+# 2026-10-16: aviso de chegada com botao "Ver encomenda" (template aprovado na Meta, id 1636389011534321).
+# Desligado por padrao; VER_ENCOMENDA_LINK_ENABLED=false volta na hora ao recebimento_encomenda sem botao.
+META_TEMPLATE_ENCOMENDA_LINK = os.getenv("META_TEMPLATE_ENCOMENDA_LINK", "recebimento_encomenda_link_ver")
+VER_ENCOMENDA_LINK_ENABLED   = os.getenv("VER_ENCOMENDA_LINK_ENABLED", "false").lower() in ("true", "1", "yes")
+VER_ENCOMENDA_TOKEN_DIAS     = int(os.getenv("VER_ENCOMENDA_TOKEN_DIAS", "30"))
+# Lista de condominios (ids separados por virgula) que recebem o botao; vazio = todos.
+# Usado para testar com 1 condominio antes de ligar para todos.
+VER_ENCOMENDA_LINK_CONDOMINIOS = {
+    int(x) for x in os.getenv("VER_ENCOMENDA_LINK_CONDOMINIOS", "").replace(" ", "").split(",") if x.isdigit()
+}
+
+
+def _link_ver_liberado(msgs: list) -> bool:
+    if not VER_ENCOMENDA_LINK_ENABLED:
+        return False
+    if not VER_ENCOMENDA_LINK_CONDOMINIOS:
+        return True
+    return any(m.get("condominio_id") in VER_ENCOMENDA_LINK_CONDOMINIOS for m in msgs)
 
 PROCESSING_TIMEOUT_MINUTES = int(os.getenv("WHATSAPP_PROCESSING_TIMEOUT_MINUTES", "15"))
 
@@ -471,7 +504,7 @@ def build_meta_template_params(data: dict, template_name: Optional[str] = None) 
     # --- Template chegada_encomenda_v3 (4 parametros) ---
 
     # --- Template chegada_encomenda_v3 (5 parametros) ---
-    if template_name == META_TEMPLATE_ENCOMENDA_V3:
+    if template_name in (META_TEMPLATE_ENCOMENDA_V3, META_TEMPLATE_ENCOMENDA_LINK):
         # {{3}} codigo_rastreio (apenas o codigo, sem Cod.Retirada)
         if codigos:
             # codigos podem conter "SD123\nCod.Retirada: 1234" — pega so a primeira linha
@@ -631,6 +664,7 @@ def send_template_meta(
     include_buttons: bool = True,
     button_payloads: Optional[list] = None,
     include_quem_retirou: bool = False,
+    url_button_param: Optional[str] = None,
 ) -> dict:
     phone = normalize_phone(phone)
     if not WHATSAPP_ENABLED:
@@ -650,6 +684,9 @@ def send_template_meta(
             button_payloads,
             include_quem_retirou=include_quem_retirou,
         )
+    if url_button_param:
+        components.append({"type": "button", "sub_type": "url", "index": "0",
+                           "parameters": [{"type": "text", "text": url_button_param}]})
 
     payload = {
         "messaging_product": "whatsapp",
@@ -664,8 +701,8 @@ def send_template_meta(
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
 
     logger.info(
-        "Meta | tel=%s | template=%s | encomenda_id=%s | botoes=%s | quem_retirou=%s",
-        phone, tpl_name, encomenda_id, include_buttons, include_quem_retirou,
+        "Meta | tel=%s | template=%s | encomenda_id=%s | botoes=%s | quem_retirou=%s | link_ver=%s",
+        phone, tpl_name, encomenda_id, include_buttons, include_quem_retirou, bool(url_button_param),
     )
 
     try:
@@ -685,6 +722,26 @@ def send_template_meta(
     except Exception as exc:
         logger.exception("Erro HTTP Meta | telefone=%s", phone)
         return {"success": False, "provider": "meta", "error": str(exc)}
+
+def gerar_token_ver_encomenda(encomenda_id: int) -> Optional[str]:
+    """Token do link "Ver encomenda". Na encomenda fica so o hash; um novo envio troca o token."""
+    token = secrets.token_urlsafe(32)
+    db = SessionLocal()
+    try:
+        r = db.execute(
+            text("UPDATE encomendas SET token_visualizacao = :h, "
+                 "token_validade_ate = DATE_ADD(NOW(), INTERVAL :dias DAY) WHERE id = :id"),
+            {"h": hashlib.sha256(token.encode()).hexdigest(), "dias": VER_ENCOMENDA_TOKEN_DIAS, "id": encomenda_id},
+        )
+        db.commit()
+        return token if r.rowcount == 1 else None
+    except Exception:
+        db.rollback()
+        logger.exception("Falha ao gerar token Ver encomenda | encomenda_id=%s", encomenda_id)
+        return None
+    finally:
+        db.close()
+
 
 # ------------------------------------------------------------------------------------------
 # SEND — logica principal
@@ -720,15 +777,28 @@ def send_message(phone: str, msgs: list, zapi_connected: bool, zapi_sends_done: 
         logger.info("ROTA: Meta exclusivo | tipo=%s | tel=%s", tipo, phone)
 
         if tipo == EVENTO_ENCOMENDA_RECEBIDA:
-            # v3.0.0 — Template chegada_encomenda_v3 com 4 params e 3 botoes
-            # {{1}}=nome {{2}}=unidade {{3}}=codigo_rastreio {{4}}=*Cod. Retirada: XXXX*
-            result = send_template_meta(
-                phone, data,
-                encomenda_id=encomenda_id,
-                template_name=META_TEMPLATE_ENCOMENDA_V3,
-                include_buttons=True,
-                include_quem_retirou=True,   # adiciona botao QUEM_RETIROU_{id}
+            token_ver = (
+                gerar_token_ver_encomenda(encomenda_id)
+                if _link_ver_liberado(msgs) and encomenda_id else None
             )
+            if token_ver:
+                # 2026-10-16 — recebimento_encomenda_link_ver: mesmos 5 params + botao URL "Ver encomenda"
+                result = send_template_meta(
+                    phone, data,
+                    encomenda_id=encomenda_id,
+                    template_name=META_TEMPLATE_ENCOMENDA_LINK,
+                    include_buttons=False,
+                    url_button_param=token_ver,
+                )
+            else:
+                # 2026-10-12 — Template recebimento_encomenda, 5 params, SEM botoes
+                # {{1}}=nome {{2}}=unidade {{3}}=codigo_rastreio {{4}}=local_armazenamento {{5}}=codigo_retirada
+                result = send_template_meta(
+                    phone, data,
+                    encomenda_id=encomenda_id,
+                    template_name=META_TEMPLATE_ENCOMENDA_V3,
+                    include_buttons=False,
+                )
 
         elif tipo == EVENTO_ENCOMENDA_ENTREGUE:
             result = send_template_meta(
@@ -739,13 +809,23 @@ def send_message(phone: str, msgs: list, zapi_connected: bool, zapi_sends_done: 
             )
 
         elif tipo == EVENTO_CADASTRO_MORADOR:
-            result = send_template_meta(
-                phone, data,
-                encomenda_id=None,
-                template_name=META_TEMPLATE_CADASTRO,
-                include_buttons=True,
-                button_payloads=["CONFIRMAR_MORADOR", "NEGAR_MORADOR"],
-            )
+            if META_TEMPLATE_CADASTRO_V2_ENABLED:
+                # confirmacao_cadastro_morador_2026 - mesmos 4 params, 1 so botao
+                result = send_template_meta(
+                    phone, data,
+                    encomenda_id=None,
+                    template_name=META_TEMPLATE_CADASTRO_V2,
+                    include_buttons=True,
+                    button_payloads=["CONFIRMAR_MORADOR"],
+                )
+            else:
+                result = send_template_meta(
+                    phone, data,
+                    encomenda_id=None,
+                    template_name=META_TEMPLATE_CADASTRO,
+                    include_buttons=True,
+                    button_payloads=["CONFIRMAR_MORADOR", "NEGAR_MORADOR"],
+                )
 
         elif tipo == EVENTO_CONFIRMACAO_WHATSAPP:
             result = send_template_meta(
