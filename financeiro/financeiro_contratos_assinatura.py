@@ -14,7 +14,12 @@
 #            Rotas (equipe interna — master ou colaborador):
 #              POST /api/financeiro/contratos-licenca/{id}/preparar   → congela (idempotente)
 #              GET  /api/financeiro/contratos-licenca/{id}/assinatura → status, assinantes, eventos e verificação
-# VERSÃO: 1.5.1 - WhatsApp do CONVITE também em segundo plano (a tela do financeiro desistia aos 30 s e mostrava erro
+# VERSÃO: 1.6.0 - modo "empresa assina ANTES": ao concluir gera também o CONTRATO COMPLETO (páginas do contrato
+#                 original + página de assinaturas/evidências, um PDF só, assinado pelo certificado) e ele vira o
+#                 arquivo_final/hash_final — igual ao modo "assina depois". O que o síndico aceitou (arquivo) e as
+#                 evidências assinadas continuam guardados. POST /{id}/gerar-completo refaz para os já concluídos
+#                 (pedido do Célio 16/10: página de assinaturas no próprio contrato) (2026-10-16)
+#         1.5.1 - WhatsApp do CONVITE também em segundo plano (a tela do financeiro desistia aos 30 s e mostrava erro
 #                 mesmo com o link enviado) (2026-10-10)
 #         1.5.0 - modo "empresa assina ANTES": no envio o contrato é assinado com o certificado (autorizado por quem
 #                 envia); após o aceite as evidências viram um PDF separado, também assinado, e conclui sozinho
@@ -988,6 +993,19 @@ def assinar_empresa(contrato_id: int, request: Request, db: Session = Depends(ge
     return {"success": True, "status": "concluido", "hash_final": h_final, "validacao": r["validacao"], "certificado": cert.get("titular")}
 
 
+def _contrato_completo(c, ev_pdf: bytes) -> tuple:
+    """Modo empresa_antes: PDF único = páginas do contrato ORIGINAL (sem a assinatura de antes, que não sobreviveria à
+    junção) + página(s) de evidências, assinado de uma vez pelo certificado. Devolve (arquivo_no_storage, sha256, validacao)."""
+    original = baixar_documento(_dados_json(c).get("arquivo_original") or c.arquivo)
+    r = _assinador("POST", "/assinar", {"pdf_b64": base64.b64encode(original).decode(), "anexos_b64": [base64.b64encode(ev_pdf).decode()],
+                                        "motivo": "Contratada — E-CONDOMINIO SISTEMAS DE GESTAO LTDA (contrato + página de assinaturas)",
+                                        "local": "Florianópolis/SC", "campo": "Assinatura_eCondominio"}, timeout=120)
+    completo = base64.b64decode(r["pdf_b64"])
+    if sha256(completo) != r["sha256"] or not (r["validacao"]["integra"] and r["validacao"]["valida"]):
+        raise HTTPException(status_code=424, detail="A assinatura do contrato completo não passou na conferência")
+    return _subir_pdf(completo, f"contrato_completo_{c.id}_{datetime.now():%Y%m%d}"), r["sha256"], r["validacao"]
+
+
 def _finalizar_empresa_antes(db: Session, contrato_id: int, request: Optional[Request], quem: dict) -> dict:
     """Modo empresa_antes, após o aceite: evidências em PDF separado, assinadas com o certificado; o contrato (já assinado)
     é o arquivo final. Idempotente; em falha fica 'falha' e o botão da equipe tenta de novo."""
@@ -1028,6 +1046,7 @@ def _finalizar_empresa_antes(db: Session, contrato_id: int, request: Optional[Re
         if sha256(ev_assinado) != r["sha256"] or not (r["validacao"]["integra"] and r["validacao"]["valida"]):
             raise HTTPException(status_code=424, detail="A assinatura das evidências não passou na conferência")
         arq_evid = _subir_pdf(ev_assinado, f"evidencias_assinadas_{contrato_id}_{datetime.now():%Y%m%d}")
+        arq_completo, h_completo, val_completo = _contrato_completo(c, ev_pdf)   # 1.6.0
     except HTTPException as e:
         _falha_assinatura(db, contrato_id, chave, e.detail, request, quem, c.hash_rascunho)
         raise
@@ -1036,15 +1055,54 @@ def _finalizar_empresa_antes(db: Session, contrato_id: int, request: Optional[Re
         raise HTTPException(status_code=424, detail="Falha ao concluir — tente de novo")
     db.execute(text("""UPDATE contratos_condominio SET status = 'concluido', hash_final = :hf, arquivo_final = :af, arquivo_evidencias = :ae,
                               hash_evidencias = :he, assinado_em = NOW(), assinado_por_nome = :q, versao = versao + 1 WHERE id = :c"""),
-               {"hf": c.hash_rascunho, "af": c.arquivo, "ae": arq_evid, "he": r["sha256"], "q": autorizado, "c": contrato_id})
+               {"hf": h_completo, "af": arq_completo, "ae": arq_evid, "he": r["sha256"], "q": autorizado, "c": contrato_id})
     db.execute(text("UPDATE contratos_assinatura_jobs SET status = 'ok', finalizado_em = NOW() WHERE chave_idempotencia = :k"), {"k": chave})
     registrar_evento(db, contrato_id, "assinado", "sistema", None, "Serviço assinador", request,
                      {"modo": "empresa_antes", "hash_contrato_assinado": c.hash_rascunho, "hash_evidencias_assinadas": r["sha256"],
-                      "hash_evidencias_json": sha256(ev_json), "certificado_titular": cert.get("titular"),
-                      "certificado_serial": cert.get("serial"), "validacao": r["validacao"], "autorizado_por": autorizado}, r["sha256"])
+                      "hash_contrato_completo": h_completo, "hash_evidencias_json": sha256(ev_json),
+                      "certificado_titular": cert.get("titular"), "certificado_serial": cert.get("serial"),
+                      "validacao": r["validacao"], "validacao_completo": val_completo, "autorizado_por": autorizado}, h_completo)
     db.commit()
-    logger.info("ASSINATURA: contrato #%s CONCLUÍDO (empresa assinou antes; evidências assinadas)", contrato_id)
-    return {"success": True, "status": "concluido", "hash_final": c.hash_rascunho, "validacao": r["validacao"], "certificado": cert.get("titular")}
+    logger.info("ASSINATURA: contrato #%s CONCLUÍDO (empresa assinou antes; evidências e contrato completo assinados)", contrato_id)
+    return {"success": True, "status": "concluido", "hash_final": h_completo, "validacao": r["validacao"], "certificado": cert.get("titular")}
+
+
+@router.post("/contratos-licenca/{contrato_id}/gerar-completo")
+def gerar_completo(contrato_id: int, request: Request, db: Session = Depends(get_db), quem: dict = Depends(usuario_interno)):
+    """1.6.0: para contratos 'empresa_antes' concluídos antes desta versão (arquivo_final = o próprio contrato, sem a página de
+    assinaturas): gera o contrato completo e passa a usá-lo como arquivo_final. Idempotente."""
+    c = db.execute(text("""SELECT id, razao_social, cnpj, status, arquivo, arquivo_final, hash_rascunho, uuid_publico, versao_modelo,
+                                  hash_final, dados FROM contratos_condominio WHERE id = :i"""), {"i": contrato_id}).fetchone()
+    if not c:
+        raise HTTPException(status_code=404, detail="Contrato não encontrado")
+    if c.status != "concluido" or modo_assinatura(c) != "empresa_antes":
+        raise HTTPException(status_code=409, detail="Só para contrato concluído no modo 'enviado já assinado pela e-Condomínio'")
+    if c.arquivo_final and c.arquivo_final != c.arquivo:
+        return {"success": True, "ja_tinha": True, "hash_final": c.hash_final}
+    sindico = db.execute(text("""SELECT id, nome, cpf_mascarado, email, telefone, metodo FROM contratos_assinantes
+                                  WHERE contrato_id = :c AND papel = 'sindico' AND status = 'aceito' ORDER BY id DESC LIMIT 1"""),
+                         {"c": contrato_id}).fetchone()
+    if not sindico:
+        raise HTTPException(status_code=409, detail="Não há aceite do contratante registrado")
+    cert = _assinador("GET", "/saude", timeout=15)["certificado"]
+    if sha256(baixar_documento(c.arquivo)) != c.hash_rascunho:
+        raise HTTPException(status_code=409, detail="O PDF guardado não confere com o documento aceito")
+    autorizado = _dados_json(c).get("assinatura_autorizada_por") or "equipe"
+    ev_pdf, ev_json = montar_evidencias(db, c, sindico, cert, autorizado, "empresa_antes")
+    arq_completo, h_completo, val = _contrato_completo(c, ev_pdf)
+    n = db.execute(text("""UPDATE contratos_condominio SET arquivo_final = :af, hash_final = :hf, versao = versao + 1
+                            WHERE id = :c AND status = 'concluido' AND arquivo_final = arquivo"""),
+                   {"af": arq_completo, "hf": h_completo, "c": contrato_id}).rowcount
+    if n != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="O contrato mudou ao mesmo tempo. Recarregue.")
+    registrar_evento(db, contrato_id, "contrato_completo", "equipe", quem.get("usuario"), quem.get("nome"), request,
+                     {"hash_contrato_completo": h_completo, "hash_contrato_assinado": c.hash_rascunho,
+                      "hash_evidencias_json": sha256(ev_json), "certificado_titular": cert.get("titular"),
+                      "validacao": val, "arquivo_final_anterior": c.arquivo_final}, h_completo)
+    db.commit()
+    logger.info("ASSINATURA: contrato #%s — contrato completo gerado (%s)", contrato_id, h_completo[:16])
+    return {"success": True, "hash_final": h_completo, "arquivo_final": arq_completo}
 
 
 def _falha_assinatura(db: Session, contrato_id: int, chave: str, motivo: str, request: Request, quem: dict, hash_doc: Optional[str]):

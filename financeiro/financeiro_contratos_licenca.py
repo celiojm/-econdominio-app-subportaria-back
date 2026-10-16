@@ -9,7 +9,9 @@
 #            contratos_condominio (quem gerou vem do login). Download sempre pelo backend (com login).
 #            Rotas (prefixo /api/financeiro): GET /contratos-licenca, GET /contratos-licenca/condominio/{id},
 #            GET /contratos-licenca/cnpj/{cnpj}, POST /contratos-licenca, GET /contratos-licenca/{id}/pdf
-# VERSÃO: 1.2.0 - acima das linhas de assinatura: "Assinado digitalmente" (CONTRATADA, certificado) e "Assinado
+# VERSÃO: 1.2.1 - GET /{id}/pdf de contrato CONCLUÍDO baixa o arquivo final (contrato completo, com a página de
+#                 assinaturas) em vez do documento enviado ao síndico (2026-10-16)
+#         1.2.0 - acima das linhas de assinatura: "Assinado digitalmente" (CONTRATADA, certificado) e "Assinado
 #                 eletronicamente" (CONTRATANTE, aceite com código); e-mail contato@ da CONTRATADA no bloco (2026-10-08)
 #         1.1.0 - contratada e contratante separadas no início (contato contato@econdominio.com.br / WhatsApp
 #                 (48) 92001-4309); planos pela qtd de unidades (usa a do cadastro se faltar); bloqueia o CNPJ da
@@ -17,7 +19,7 @@
 #                 período já pago (2026-10-08)
 #         1.0.1 - consulta por CNPJ devolve também logradouro/número/complemento/bairro/CEP separados (2026-10-06)
 #         1.0.0 - criação
-# data criação: 2026-10-05 data alteração: 2026-10-08
+# data criação: 2026-10-05 data alteração: 2026-10-16
 # ============================================================================
 import base64
 import io
@@ -182,12 +184,22 @@ def dados_condominio(condominio_id: int, db: Session = Depends(get_db), quem: di
     return d
 
 
-@router.get("/contratos-licenca/cnpj/{cnpj}")
-def buscar_cnpj(cnpj: str, db: Session = Depends(get_db), quem: dict = Depends(usuario_interno)):
+_CACHE_RECEITA_TTL_SEGUNDOS = 300  # 2026-10-12: funil consulta 2x o mesmo CNPJ (prévia + envio final)
+_cache_receita: dict = {}  # {cnpj_digitos: (timestamp, dados)}
+
+
+def consultar_cnpj_receita(db: Session, cnpj: str) -> dict:
+    """2026-10-12: extraído de buscar_cnpj() pra ser reaproveitado pelo funil público de
+    leads (leads/funil.py), sem exigir login de equipe. Mesma lógica, mesmo formato de
+    retorno. Levanta HTTPException igual antes.
+    Cache de 5 min por CNPJ (só a resposta da Receita, não o "já cadastrado" - esse é
+    sempre lido direto do banco, pra nunca mostrar dado velho de um cadastro que mudou):
+    evita 2ª chamada à Receita no mesmo funil (prévia + envio final) e poupa o limite de
+    3 consultas/min da Receita."""
     dig = _digitos(cnpj)
     if len(dig) != 14:
         raise HTTPException(status_code=400, detail="CNPJ inválido (precisa ter 14 dígitos)")
-    # já cadastrado? usa o cadastro
+    # já cadastrado? usa o cadastro (sempre em tempo real, nunca do cache)
     cid = db.execute(text("""SELECT id FROM condominios
                               WHERE REPLACE(REPLACE(REPLACE(cnpj,'.',''),'/',''),'-','') = :d
                               ORDER BY ativo DESC, id DESC LIMIT 1"""), {"d": dig}).scalar()
@@ -196,6 +208,11 @@ def buscar_cnpj(cnpj: str, db: Session = Depends(get_db), quem: dict = Depends(u
         d["planos"] = _tabela_planos(db, d["quantidade_unidades"], cid)
         d["origem"] = "cadastro"
         return d
+
+    cacheado = _cache_receita.get(dig)
+    if cacheado and (datetime.now().timestamp() - cacheado[0]) < _CACHE_RECEITA_TTL_SEGUNDOS:
+        return cacheado[1]
+
     # 4xx em vez de 502/504 (o Cloudflare troca 5xx de gateway pela página dele — CLAUDE.md 15-S)
     try:
         resp = requests.get(f"https://www.receitaws.com.br/v1/cnpj/{dig}", headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
@@ -211,16 +228,24 @@ def buscar_cnpj(cnpj: str, db: Session = Depends(get_db), quem: dict = Depends(u
         raise HTTPException(status_code=404, detail=r.get("message") or "CNPJ não encontrado na Receita")
     c = {"endereco": r.get("logradouro"), "numero": r.get("numero"), "complemento": r.get("complemento"),
          "bairro": r.get("bairro"), "cidade": r.get("municipio"), "estado": r.get("uf"), "cep": r.get("cep")}
-    return {
+    dados = {
         "condominio_id": None, "origem": "receita", "razao_social": r.get("nome") or r.get("fantasia") or "",
         "cnpj": _fmt_cnpj(dig), "endereco": _endereco(c), "cidade": r.get("municipio") or "", "uf": r.get("uf") or "",
         "representante": "", "cpf_representante": "", "email": r.get("email") or "", "telefone": r.get("telefone") or "",
         "quantidade_unidades": None, "plano": "mensal", "forma_pagamento": FORMA_PADRAO, "situacao_receita": r.get("situacao"),
+        "natureza_juridica": r.get("natureza_juridica"),
         "planos": _tabela_planos(db, None, None),
         # 2026-10-05: partes do endereço vindas da Receita
         "logradouro": r.get("logradouro") or "", "numero": r.get("numero") or "", "complemento": r.get("complemento") or "",
         "bairro": r.get("bairro") or "", "cep": _digitos(r.get("cep")),
     }
+    _cache_receita[dig] = (datetime.now().timestamp(), dados)
+    return dados
+
+
+@router.get("/contratos-licenca/cnpj/{cnpj}")
+def buscar_cnpj(cnpj: str, db: Session = Depends(get_db), quem: dict = Depends(usuario_interno)):
+    return consultar_cnpj_receita(db, cnpj)
 
 
 # ─── geração ────────────────────────────────────────────────────────────────
@@ -290,12 +315,14 @@ def gerar_contrato(dados: NovoContrato, db: Session = Depends(get_db), quem: dic
 
 @router.get("/contratos-licenca/{contrato_id}/pdf")
 def baixar_pdf(contrato_id: int, db: Session = Depends(get_db), quem: dict = Depends(usuario_interno)):
-    r = db.execute(text("SELECT razao_social, arquivo, criado_em FROM contratos_condominio WHERE id = :i"),
+    r = db.execute(text("SELECT razao_social, arquivo, arquivo_final, status, criado_em FROM contratos_condominio WHERE id = :i"),
                    {"i": contrato_id}).fetchone()
     if not r or not r.arquivo:
         raise HTTPException(status_code=404, detail="Contrato não encontrado")
+    # 2026-10-16: concluído → o arquivo final (contrato completo, com a página de assinaturas)
+    arquivo = r.arquivo_final if r.status == "concluido" and r.arquivo_final else r.arquivo
     try:
-        resp = httpx.get(f"{STORAGE_BASE_URL}/storage/documento/{r.arquivo}", headers={"x-api-key": STORAGE_API_KEY}, timeout=30)
+        resp = httpx.get(f"{STORAGE_BASE_URL}/storage/documento/{arquivo}", headers={"x-api-key": STORAGE_API_KEY}, timeout=30)
     except Exception:
         raise HTTPException(status_code=424, detail="Storage indisponível no momento")
     if resp.status_code != 200:
